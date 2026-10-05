@@ -59,6 +59,20 @@ def test_cli_uv_run_failure(tmp_path):
     assert "fail.py exited with code 3" in result.output
 
 
+# `--with` arguments for examples that rely on them.
+EXAMPLE_WITH = {
+    "03_uv_with.py": ("rich", "requests>=2,<3"),
+}
+
+
 @pytest.mark.parametrize("example", sorted(EXAMPLES_DIR.glob("*.py")), ids=lambda p: p.name)
 def test_examples(example):
-    run_job(build_job(example))
+    run_job(build_job(example, EXAMPLE_WITH.get(example.name, ())))
+
+
+def test_cli_uv_run_with(tmp_path):
+    script = tmp_path / "with_deps.py"
+    script.write_text("import six\n\nprint(f'six version {six.__version__}')\n")
+    result = CliRunner().invoke(main, ["uv", "run", "--with", "six", str(script)])
+    assert result.exit_code == 0, result.output
+    assert "Finished running with_deps.py" in result.output

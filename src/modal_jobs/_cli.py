@@ -40,15 +40,39 @@ def parse_script_metadata(script: str) -> dict:
     return tomllib.loads(content)
 
 
-def build_job(path: Path) -> JobSpec:
+def split_requirements(value: str) -> list[str]:
+    """Split a comma-separated list of requirements like `uv run --with`.
+
+    Commas inside extras (`pkg[a,b]`) or followed by a version operator
+    (`requests>=2,<3`) are part of a single requirement.
+    """
+    requirements = []
+    depth = 0
+    start = 0
+    for i, char in enumerate(value):
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth = max(depth - 1, 0)
+        elif char == "," and depth == 0:
+            if value[i + 1 :].lstrip()[:1] in ("!", "=", "<", ">", "~"):
+                continue
+            requirements.append(value[start:i])
+            start = i + 1
+    requirements.append(value[start:])
+    return [req.strip() for req in requirements if req.strip()]
+
+
+def build_job(path: Path, with_: tuple[str, ...] = ()) -> JobSpec:
     remote_path = f"/root/{path.name}"
     metadata = parse_script_metadata(path.read_text())
+    extra = [req for value in with_ for req in split_requirements(value)]
     return JobSpec(
         local_path=path,
         remote_path=remote_path,
         function_name=path.stem,
         command=["python", remote_path],
-        dependencies=tuple(metadata.get("dependencies", ())),
+        dependencies=(*metadata.get("dependencies", ()), *extra),
     )
 
 
@@ -84,10 +108,18 @@ def uv():
     "path",
     type=click.Path(exists=True, dir_okay=False, resolve_path=True, path_type=Path),
 )
-def run(path: Path):
+@click.option(
+    "--with",
+    "with_",
+    multiple=True,
+    metavar="WITH",
+    help="Run with the given packages installed. May be provided multiple times, "
+    "or as a comma-separated list.",
+)
+def run(path: Path, with_: tuple[str, ...]):
     """Run the Python script at PATH on Modal with `uv run`."""
     try:
-        job = build_job(path)
+        job = build_job(path, with_)
     except (ValueError, tomllib.TOMLDecodeError) as e:
         raise click.ClickException(f"Invalid script metadata in {path.name}: {e}") from e
     try:
