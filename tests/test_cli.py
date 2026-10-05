@@ -7,6 +7,7 @@ from modal_jobs._cli import (
     build_job,
     is_local_path,
     main,
+    parse_duration,
     parse_script_metadata,
     parse_secret,
     parse_volume,
@@ -302,6 +303,42 @@ def test_parse_secret_invalid(value, match):
         parse_secret(value)
 
 
+@pytest.mark.parametrize(
+    "value, seconds",
+    [
+        ("90", 90),
+        ("30s", 30),
+        ("10m", 600),
+        ("2h", 7200),
+        ("1d", 86400),
+        ("1h30m", 5400),
+        ("1h0m5s", 3605),
+    ],
+)
+def test_parse_duration(value, seconds):
+    assert parse_duration(value) == seconds
+
+
+@pytest.mark.parametrize(
+    "value, match",
+    [
+        ("", "Expected a duration"),
+        ("1x", "Expected a duration"),
+        ("1.5h", "Expected a duration"),
+        ("30m1h", "Expected a duration"),
+        ("1h30", "Expected a duration"),
+        ("-5", "Expected a duration"),
+        ("0", "between 1 second and 24 hours"),
+        ("0m", "between 1 second and 24 hours"),
+        ("86401", "between 1 second and 24 hours"),
+        ("1d1s", "between 1 second and 24 hours"),
+    ],
+)
+def test_parse_duration_invalid(value, match):
+    with pytest.raises(ValueError, match=match):
+        parse_duration(value)
+
+
 def test_build_job_with_secrets(tmp_path):
     script = tmp_path / "job.py"
     script.write_text("print('hi')")
@@ -358,6 +395,34 @@ def test_run_gpu(tmp_path, monkeypatch):
     assert calls[0].gpu == "H100:8"
 
 
+def test_run_timeout(tmp_path, monkeypatch):
+    script = tmp_path / "job.py"
+    script.write_text("print('hi')")
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(main, ["uv", "run", "--timeout", "1h", str(script)])
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0].timeout == 3600
+
+
+@pytest.mark.parametrize("command", [["uv", "run"], ["run"]])
+@pytest.mark.parametrize("timeout", ["0", "86401", "1x"])
+def test_run_timeout_invalid(command, timeout, monkeypatch):
+    monkeypatch.setattr(_cli, "run_job", lambda job: None)
+    if command == ["run"]:
+        args = [*command, "--timeout", timeout, "docker.io/ubuntu", "ls"]
+    else:
+        args = [*command, "--timeout", timeout, "ls"]
+
+    result = CliRunner().invoke(main, args)
+
+    assert result.exit_code == 2
+    assert "Invalid value for '--timeout'" in result.output
+
+
 def test_build_job_with_image(tmp_path):
     script = tmp_path / "job.py"
     script.write_text("print('hi')")
@@ -399,6 +464,8 @@ def test_docker_run_options(tmp_path, monkeypatch):
             "MY_SECRET=value",
             "--gpu",
             "T4",
+            "--timeout",
+            "10m",
             "docker.io/ubuntu",
             "ls",
             "-v",
@@ -414,6 +481,7 @@ def test_docker_run_options(tmp_path, monkeypatch):
             local_dirs=((tmp_path / "data", "/data"),),
             local_secrets=(("MY_SECRET", "value"),),
             gpu="T4",
+            timeout=600,
             image="docker.io/ubuntu",
             add_python="3.12",
         )

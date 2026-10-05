@@ -37,6 +37,8 @@ class JobSpec:
     local_secrets: tuple[tuple[str, str], ...] = ()
     # GPU type to request, e.g. `T4` or `H100:8`, passed to Modal as is.
     gpu: str | None = None
+    # Maximum run time in seconds, or None for Modal's default.
+    timeout: int | None = None
     # Registry image to run in, e.g. `docker.io/ubuntu`, or None for `debian_slim`.
     image: str | None = None
     # Python version to add to `image`, for images without Python.
@@ -92,6 +94,29 @@ def parse_secret(value: str) -> str | tuple[str, str]:
     return key, secret_value
 
 
+DURATION_RE = re.compile(r"(?:(?P<d>\d+)d)?(?:(?P<h>\d+)h)?(?:(?P<m>\d+)m)?(?:(?P<s>\d+)s)?")
+DURATION_UNITS = {"d": 86400, "h": 3600, "m": 60, "s": 1}
+# Modal's maximum function timeout.
+MAX_TIMEOUT = 86400
+
+
+def parse_duration(value: str) -> int:
+    """Parse a duration like `90`, `30s`, `10m`, `2h`, or `1h30m` into seconds.
+
+    A plain number is in seconds. Units must be in `d`, `h`, `m`, `s` order.
+    """
+    if value.isdigit():
+        seconds = int(value)
+    else:
+        match = DURATION_RE.fullmatch(value)
+        if not value or match is None:
+            raise ValueError(f"Expected a duration like `90`, `10m`, or `1h30m`, got {value!r}")
+        seconds = sum(int(n) * DURATION_UNITS[unit] for unit, n in match.groupdict().items() if n)
+    if not 1 <= seconds <= MAX_TIMEOUT:
+        raise ValueError(f"Duration must be between 1 second and 24 hours, got {value!r}")
+    return seconds
+
+
 def parse_script_metadata(script: str) -> dict:
     """Parse the PEP 723 `script` metadata block from a Python script."""
     matches = [m for m in SCRIPT_METADATA_RE.finditer(script) if m.group("type") == "script"]
@@ -142,6 +167,7 @@ def build_job(
     gpu: str | None = None,
     image: str | None = None,
     add_python: str | None = None,
+    timeout: int | None = None,
 ) -> JobSpec:
     """Build a JobSpec for `command`.
 
@@ -151,7 +177,8 @@ def build_job(
     `volumes` holds `(source, dest)` pairs as returned by `parse_volume`, and
     `secrets` holds values as returned by `parse_secret`. `gpu` is the GPU type
     to request, passed to Modal as is. `image` is a registry image to run in, and
-    `add_python` is a Python version to add to it.
+    `add_python` is a Python version to add to it. `timeout` is the maximum run
+    time in seconds.
     """
     extra = tuple(req for value in with_ for req in split_requirements(value))
     if image is None and is_script(command):
@@ -181,6 +208,7 @@ def build_job(
         secrets=modal_secrets,
         local_secrets=local_secrets,
         gpu=gpu,
+        timeout=timeout,
         image=image,
         add_python=add_python,
     )
@@ -214,6 +242,7 @@ def run_job(job: JobSpec):
             volumes=volumes,
             secrets=secrets,
             gpu=job.gpu,
+            timeout=job.timeout,
         )(run_cmd)
         with app.run():
             run_cmd_local.remote(job.command)
@@ -222,6 +251,15 @@ def run_job(job: JobSpec):
 def parse_volumes(ctx, param, values: tuple[str, ...]) -> tuple[tuple[str | Path, str], ...]:
     try:
         return tuple(parse_volume(value) for value in values)
+    except ValueError as e:
+        raise click.BadParameter(str(e)) from e
+
+
+def parse_timeout(ctx, param, value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return parse_duration(value)
     except ValueError as e:
         raise click.BadParameter(str(e)) from e
 
@@ -260,6 +298,13 @@ gpu_option = click.option(
     metavar="GPU",
     help="Run on a GPU, e.g. `T4`, `A100-80GB`, or `H100:8` for multiple GPUs.",
 )
+timeout_option = click.option(
+    "--timeout",
+    metavar="DURATION",
+    callback=parse_timeout,
+    help="Stop the job after DURATION, e.g. `90` (seconds), `10m`, `2h`, or `1h30m`. "
+    "Defaults to Modal's default of 5 minutes, up to a maximum of 24 hours.",
+)
 COMMAND_CONTEXT_SETTINGS = {"ignore_unknown_options": True, "allow_interspersed_args": False}
 
 
@@ -282,6 +327,7 @@ def main():
 @volume_option
 @secret_option
 @gpu_option
+@timeout_option
 @click.option(
     "--add-python",
     metavar="VERSION",
@@ -294,6 +340,7 @@ def docker_run(
     volumes: tuple[tuple[str | Path, str], ...],
     secrets: tuple[str | tuple[str, str], ...],
     gpu: str | None,
+    timeout: int | None,
     add_python: str | None,
 ):
     """Run COMMAND in the registry image IMAGE on Modal, like `docker run`.
@@ -301,7 +348,13 @@ def docker_run(
     For example, `modal-jobs run --add-python 3.12 docker.io/ubuntu echo hi`.
     """
     job = build_job(
-        command, volumes=volumes, secrets=secrets, gpu=gpu, image=image, add_python=add_python
+        command,
+        volumes=volumes,
+        secrets=secrets,
+        gpu=gpu,
+        image=image,
+        add_python=add_python,
+        timeout=timeout,
     )
     import modal.exception
 
@@ -334,12 +387,14 @@ def uv():
 @volume_option
 @secret_option
 @gpu_option
+@timeout_option
 def uv_run(
     command: tuple[str, ...],
     with_: tuple[str, ...],
     volumes: tuple[tuple[str | Path, str], ...],
     secrets: tuple[str | tuple[str, str], ...],
     gpu: str | None,
+    timeout: int | None,
 ):
     """Run COMMAND on Modal with `uv run`.
 
@@ -355,7 +410,7 @@ def uv_run(
     else:
         name = shlex.join(command)
     try:
-        job = build_job(command, with_, volumes, secrets, gpu)
+        job = build_job(command, with_, volumes, secrets, gpu, timeout=timeout)
     except (ValueError, tomllib.TOMLDecodeError) as e:
         raise click.ClickException(f"Invalid script metadata in {name}: {e}") from e
     run_and_report(job, name)
