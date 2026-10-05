@@ -24,14 +24,14 @@ print(f"six version {six.__version__}")
 def test_run_job_hello(tmp_path, capfd):
     script = tmp_path / "hello.py"
     script.write_text("print('hello from modal')\n")
-    run_job(build_job(script))
+    run_job(build_job([str(script)]))
     assert "hello from modal" in capfd.readouterr().out
 
 
 def test_run_job_with_dependencies(tmp_path, capfd):
     script = tmp_path / "deps.py"
     script.write_text(DEPS_SCRIPT)
-    run_job(build_job(script))
+    run_job(build_job([str(script)]))
     assert "six version" in capfd.readouterr().out
 
 
@@ -39,7 +39,7 @@ def test_run_job_failure_raises(tmp_path):
     script = tmp_path / "fail.py"
     script.write_text("import sys\nsys.exit(3)\n")
     with pytest.raises(subprocess.CalledProcessError) as exc_info:
-        run_job(build_job(script))
+        run_job(build_job([str(script)]))
     assert exc_info.value.returncode == 3
 
 
@@ -59,6 +59,18 @@ def test_cli_uv_run_failure(tmp_path):
     assert "fail.py exited with code 3" in result.output
 
 
+def test_cli_uv_run_command():
+    result = CliRunner().invoke(
+        main, ["uv", "run", "python", "-c", "print('hello from the cloud')"]
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_run_job_command_with(capfd):
+    run_job(build_job(["python", "-c", "import six; print(f'six {six.__version__}')"], ("six",)))
+    assert "six " in capfd.readouterr().out
+
+
 # `--with` arguments for examples that rely on them.
 EXAMPLE_WITH = {
     "03_uv_with.py": ("rich", "requests>=2,<3"),
@@ -74,7 +86,7 @@ EXAMPLE_SECRETS = {
 def test_examples(example):
     run_job(
         build_job(
-            example,
+            [str(example)],
             EXAMPLE_WITH.get(example.name, ()),
             secrets=EXAMPLE_SECRETS.get(example.name, ()),
         )

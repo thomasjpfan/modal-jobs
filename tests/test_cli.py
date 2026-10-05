@@ -29,20 +29,40 @@ import requests
 def test_build_job(tmp_path):
     script = tmp_path / "job.py"
     script.write_text("print('hi')")
-    job = build_job(script)
+    job = build_job([str(script)])
     assert job == JobSpec(
-        local_path=script,
-        remote_path="/root/job.py",
         function_name="job",
         command=["python", "/root/job.py"],
+        local_path=script,
+        remote_path="/root/job.py",
         dependencies=(),
     )
+
+
+def test_build_job_script_args(tmp_path):
+    script = tmp_path / "job.py"
+    script.write_text("print('hi')")
+    job = build_job([str(script), "--n", "3"])
+    assert job.command == ["python", "/root/job.py", "--n", "3"]
+
+
+def test_build_job_command():
+    job = build_job(["python", "-c", "print(1)"], ("six",))
+    assert job == JobSpec(
+        function_name="python",
+        command=["python", "-c", "print(1)"],
+        dependencies=("six",),
+    )
+
+
+def test_build_job_command_function_name():
+    assert build_job(["/usr/bin/python3.12", "-V"]).function_name == "python3_12"
 
 
 def test_build_job_with_dependencies(tmp_path):
     script = tmp_path / "job.py"
     script.write_text(UV_SCRIPT)
-    job = build_job(script)
+    job = build_job([str(script)])
     assert job.dependencies == ("requests<3", "rich")
 
 
@@ -77,7 +97,41 @@ def test_run_runs_built_job(tmp_path, monkeypatch):
     result = CliRunner().invoke(main, ["uv", "run", str(script)])
 
     assert result.exit_code == 0, result.output
-    assert calls == [build_job(script)]
+    assert calls == [build_job([str(script)])]
+
+
+def test_run_command(monkeypatch):
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(
+        main, ["uv", "run", "--with", "six", "python", "-c", 'print("Hello from the cloud!")']
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [build_job(["python", "-c", 'print("Hello from the cloud!")'], ("six",))]
+    assert "Finished running python -c" in result.output
+
+
+def test_run_script_args_not_parsed_as_options(tmp_path, monkeypatch):
+    script = tmp_path / "job.py"
+    script.write_text("print('hi')")
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(main, ["uv", "run", str(script), "-v", "x", "--with", "y"])
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0].command == ["python", "/root/job.py", "-v", "x", "--with", "y"]
+    assert calls[0].volumes == ()
+    assert calls[0].dependencies == ()
+
+
+def test_run_requires_command():
+    result = CliRunner().invoke(main, ["uv", "run"])
+    assert result.exit_code == 2
+    assert "Missing argument 'COMMAND...'" in result.output
 
 
 def test_run_rejects_invalid_metadata(tmp_path, monkeypatch):
@@ -116,7 +170,7 @@ def test_split_requirements(value, expected):
 def test_build_job_with(tmp_path):
     script = tmp_path / "job.py"
     script.write_text(UV_SCRIPT)
-    job = build_job(script, ("six", "numpy>=2,<3,pandas"))
+    job = build_job([str(script)], ("six", "numpy>=2,<3,pandas"))
     assert job.dependencies == ("requests<3", "rich", "six", "numpy>=2,<3", "pandas")
 
 
@@ -181,7 +235,7 @@ def test_build_job_with_volumes(tmp_path):
     script = tmp_path / "job.py"
     script.write_text("print('hi')")
     job = build_job(
-        script, volumes=(("my-modal-volume", "/mnt/vol"), (tmp_path / "data", "/root/data"))
+        [str(script)], volumes=(("my-modal-volume", "/mnt/vol"), (tmp_path / "data", "/root/data"))
     )
     assert job.volumes == (("my-modal-volume", "/mnt/vol"),)
     assert job.local_dirs == ((tmp_path / "data", "/root/data"),)
@@ -251,7 +305,7 @@ def test_parse_secret_invalid(value, match):
 def test_build_job_with_secrets(tmp_path):
     script = tmp_path / "job.py"
     script.write_text("print('hi')")
-    job = build_job(script, secrets=("my-modal-secret", ("MY_SECRET", "value")))
+    job = build_job([str(script)], secrets=("my-modal-secret", ("MY_SECRET", "value")))
     assert job.secrets == ("my-modal-secret",)
     assert job.local_secrets == (("MY_SECRET", "value"),)
 

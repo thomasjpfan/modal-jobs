@@ -1,6 +1,8 @@
 import re
+import shlex
 import subprocess
 import tomllib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -19,10 +21,11 @@ SCRIPT_METADATA_RE = re.compile(
 
 @dataclass(frozen=True)
 class JobSpec:
-    local_path: Path
-    remote_path: str
     function_name: str
     command: list[str]
+    # Script to upload and its path in the container, or None for plain commands.
+    local_path: Path | None = None
+    remote_path: str | None = None
     dependencies: tuple[str, ...] = ()
     # (volume name, remote path) pairs of Modal volumes to mount.
     volumes: tuple[tuple[str, str], ...] = ()
@@ -120,30 +123,48 @@ def split_requirements(value: str) -> list[str]:
     return [req.strip() for req in requirements if req.strip()]
 
 
+def is_script(command: Sequence[str]) -> bool:
+    """Return True if `command` runs a Python script, like `uv run script.py`."""
+    return command[0].endswith(".py")
+
+
 def build_job(
-    path: Path,
+    command: Sequence[str],
     with_: tuple[str, ...] = (),
     volumes: tuple[tuple[str | Path, str], ...] = (),
     secrets: tuple[str | tuple[str, str], ...] = (),
 ) -> JobSpec:
-    """Build a JobSpec for the script at `path`.
+    """Build a JobSpec for `command`.
+
+    If `command` starts with a `.py` file, that script is uploaded and run with
+    the remaining arguments. Otherwise, `command` is run as is.
 
     `volumes` holds `(source, dest)` pairs as returned by `parse_volume`, and
     `secrets` holds values as returned by `parse_secret`.
     """
-    remote_path = f"/root/{path.name}"
-    metadata = parse_script_metadata(path.read_text())
-    extra = [req for value in with_ for req in split_requirements(value)]
+    extra = tuple(req for value in with_ for req in split_requirements(value))
+    if is_script(command):
+        local_path = Path(command[0]).resolve()
+        remote_path = f"/root/{local_path.name}"
+        metadata = parse_script_metadata(local_path.read_text())
+        function_name = local_path.stem
+        command = ["python", remote_path, *command[1:]]
+        dependencies = (*metadata.get("dependencies", ()), *extra)
+    else:
+        local_path = remote_path = None
+        function_name = re.sub(r"[^A-Za-z0-9_-]", "_", Path(command[0]).name)
+        command = list(command)
+        dependencies = extra
     modal_volumes = tuple((src, dest) for src, dest in volumes if not isinstance(src, Path))
     local_dirs = tuple((src, dest) for src, dest in volumes if isinstance(src, Path))
     modal_secrets = tuple(secret for secret in secrets if isinstance(secret, str))
     local_secrets = tuple(secret for secret in secrets if not isinstance(secret, str))
     return JobSpec(
-        local_path=path,
+        function_name=function_name,
+        command=command,
+        local_path=local_path,
         remote_path=remote_path,
-        function_name=path.stem,
-        command=["python", remote_path],
-        dependencies=(*metadata.get("dependencies", ()), *extra),
+        dependencies=dependencies,
         volumes=modal_volumes,
         local_dirs=local_dirs,
         secrets=modal_secrets,
@@ -161,7 +182,8 @@ def run_job(job: JobSpec):
     if job.dependencies:
         image = image.uv_pip_install(*job.dependencies)
     image = image.add_local_file(_runner.__file__, "/root/modal_jobs/_runner.py")
-    image = image.add_local_file(job.local_path, job.remote_path)
+    if job.local_path is not None:
+        image = image.add_local_file(job.local_path, job.remote_path)
     for local_dir, dest in job.local_dirs:
         image = image.add_local_dir(local_dir, dest, copy=False)
     volumes = {dest: modal.Volume.from_name(name) for name, dest in job.volumes}
@@ -200,11 +222,8 @@ def uv():
     """Run jobs with uv."""
 
 
-@uv.command()
-@click.argument(
-    "path",
-    type=click.Path(exists=True, dir_okay=False, resolve_path=True, path_type=Path),
-)
+@uv.command(context_settings={"ignore_unknown_options": True, "allow_interspersed_args": False})
+@click.argument("command", nargs=-1, required=True, type=click.UNPROCESSED)
 @click.option(
     "--with",
     "with_",
@@ -236,18 +255,30 @@ def uv():
     "the environment variable KEY to VALUE as a secret. May be provided multiple times.",
 )
 def run(
-    path: Path,
+    command: tuple[str, ...],
     with_: tuple[str, ...],
     volumes: tuple[tuple[str | Path, str], ...],
     secrets: tuple[str | tuple[str, str], ...],
 ):
-    """Run the Python script at PATH on Modal with `uv run`."""
+    """Run COMMAND on Modal with `uv run`.
+
+    If COMMAND starts with a Python script, the script is uploaded and run with
+    its inline dependencies. Otherwise, COMMAND is run as is, e.g.
+    `modal-jobs uv run python -c 'print("hi")'`.
+    """
+    if is_script(command):
+        path = Path(command[0])
+        if not path.is_file():
+            raise click.BadParameter(f"File {str(path)!r} does not exist.", param_hint="COMMAND")
+        name = path.name
+    else:
+        name = shlex.join(command)
     try:
-        job = build_job(path, with_, volumes, secrets)
+        job = build_job(command, with_, volumes, secrets)
     except (ValueError, tomllib.TOMLDecodeError) as e:
-        raise click.ClickException(f"Invalid script metadata in {path.name}: {e}") from e
+        raise click.ClickException(f"Invalid script metadata in {name}: {e}") from e
     try:
         run_job(job)
     except subprocess.CalledProcessError as e:
-        raise click.ClickException(f"{path.name} exited with code {e.returncode}") from e
-    console.print(f"[bold green]✓[/bold green] Finished running {path.name}")
+        raise click.ClickException(f"{name} exited with code {e.returncode}") from e
+    console.print(f"[bold green]✓[/bold green] Finished running {name}")
