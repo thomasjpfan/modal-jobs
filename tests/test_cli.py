@@ -769,3 +769,60 @@ def test_run_url_not_script(monkeypatch):
 
     assert result.exit_code == 2
     assert "must point to a .py script" in result.output
+
+
+@pytest.mark.parametrize("flag", ["--detach", "-d"])
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [(["uv", "run"], []), (["run"], ["--add-python", "3.12", "docker.io/ubuntu"])],
+)
+def test_run_detach(monkeypatch, flag, command, args):
+    jobs = []
+
+    def run_job(job):
+        jobs.append(job)
+        return "ap-123"
+
+    monkeypatch.setattr(_cli, "run_job", run_job)
+
+    result = CliRunner().invoke(main, [*command, flag, *args, "echo", "hi"])
+
+    assert result.exit_code == 0, result.output
+    assert len(jobs) == 1
+    assert jobs[0].detach
+    assert "Started echo hi in the background" in result.output
+    assert "modal app logs ap-123" in result.output
+    assert "modal app stop ap-123" in result.output
+    assert "Finished" not in result.output
+
+
+def test_run_interrupted(monkeypatch):
+    jobs = []
+
+    def run_job(job):
+        jobs.append(job)
+        return "ap-123"
+
+    monkeypatch.setattr(_cli, "run_job", run_job)
+
+    result = CliRunner().invoke(main, ["uv", "run", "echo", "hi"])
+
+    assert result.exit_code == 0, result.output
+    assert not jobs[0].detach
+    assert "Finished" not in result.output
+    assert "Started" not in result.output
+
+
+def test_run_detach_dry_run(monkeypatch):
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(main, ["uv", "run", "--detach", "--dry-run", "echo", "hi"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == []
+    assert result.output == "Function: echo\nCommand: echo hi\nDetach: yes\n"
+
+
+def test_format_job_detach():
+    assert "Detach" not in format_job(build_job(["echo", "hi"]))

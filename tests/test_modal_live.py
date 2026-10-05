@@ -1,3 +1,4 @@
+import re
 import subprocess
 from pathlib import Path
 
@@ -191,3 +192,14 @@ def test_cli_run_image_with_python():
     )
     assert result.exit_code == 0, result.output
     assert "3.12" in result.output
+
+
+def test_cli_uv_run_detach(tmp_path):
+    script = tmp_path / "hello.py"
+    script.write_text("print('hello from modal')\n")
+    result = CliRunner().invoke(main, ["uv", "run", "--detach", str(script)])
+    assert result.exit_code == 0, result.output
+    assert "Started hello.py in the background" in result.output
+    match = re.search(r"modal app stop (ap-\w+)", result.output)
+    assert match is not None, result.output
+    subprocess.run(["modal", "app", "stop", match.group(1)], check=False)

@@ -49,6 +49,8 @@ class JobSpec:
     image: str | None = None
     # Python version to add to `image`, for images without Python.
     add_python: str | None = None
+    # Return right after starting the job instead of waiting for it to finish.
+    detach: bool = False
 
 
 def is_local_path(source: str) -> bool:
@@ -212,6 +214,7 @@ def build_job(
     add_python: str | None = None,
     timeout: int | None = None,
     retries: int = 0,
+    detach: bool = False,
 ) -> JobSpec:
     """Build a JobSpec for `command`.
 
@@ -223,6 +226,7 @@ def build_job(
     to request, passed to Modal as is. `image` is a registry image to run in, and
     `add_python` is a Python version to add to it. `timeout` is the maximum run
     time in seconds, and `retries` is the number of times to retry the job after it fails.
+    If `detach` is True, the job is started without waiting for it to finish.
     """
     extra = tuple(req for value in with_ for req in split_requirements(value))
     if image is None and is_script(command):
@@ -257,6 +261,7 @@ def build_job(
         retries=retries,
         image=image,
         add_python=add_python,
+        detach=detach,
     )
 
 
@@ -277,6 +282,8 @@ def format_job(job: JobSpec) -> str:
         lines.append(f"Timeout: {job.timeout}s")
     if job.retries:
         lines.append(f"Retries: {job.retries}")
+    if job.detach:
+        lines.append("Detach: yes")
     for name, dest in job.volumes:
         lines.append(f"Volume: {name} -> {dest}")
     for local_dir, dest in job.local_dirs:
@@ -288,7 +295,12 @@ def format_job(job: JobSpec) -> str:
     return "\n".join(lines)
 
 
-def run_job(job: JobSpec):
+def run_job(job: JobSpec) -> str | None:
+    """Run `job` on Modal.
+
+    Returns the app ID if the job is still running, because it was detached or
+    the client was interrupted, or None if the job finished.
+    """
     import modal
 
     from modal_jobs import _runner
@@ -309,6 +321,8 @@ def run_job(job: JobSpec):
     secrets = [modal.Secret.from_name(name) for name in job.secrets]
     if job.local_secrets:
         secrets.append(modal.Secret.from_dict(dict(job.local_secrets)))
+    # Modal rejects `timeout=None`, so only pass it when set.
+    timeout = {"timeout": job.timeout} if job.timeout is not None else {}
     with modal.enable_output():
         run_cmd_local = app.function(
             image=image,
@@ -316,11 +330,17 @@ def run_job(job: JobSpec):
             volumes=volumes,
             secrets=secrets,
             gpu=job.gpu,
-            timeout=job.timeout,
             retries=job.retries or None,
+            **timeout,
         )(run_cmd)
-        with app.run():
-            run_cmd_local.remote(job.command)
+        # A detached app keeps running the job if the client disconnects, e.g. on Ctrl-C.
+        finished = False
+        with app.run(detach=True):
+            call = run_cmd_local.spawn(job.command)
+            if not job.detach:
+                call.get()
+                finished = True
+    return None if finished else app.app_id
 
 
 def parse_volumes(ctx, param, values: tuple[str, ...]) -> tuple[tuple[str | Path, str], ...]:
@@ -406,6 +426,13 @@ retries_option = click.option(
     metavar="N",
     help=f"Retry the job up to N times if it fails. Defaults to 0, up to a maximum of {MAX_RETRIES}.",
 )
+detach_option = click.option(
+    "-d",
+    "--detach",
+    is_flag=True,
+    help="Start the job and return without waiting for it to finish. "
+    "The job keeps running in the background.",
+)
 dry_run_option = click.option(
     "--dry-run",
     is_flag=True,
@@ -416,10 +443,18 @@ COMMAND_CONTEXT_SETTINGS = {"ignore_unknown_options": True, "allow_interspersed_
 
 def run_and_report(job: JobSpec, name: str):
     try:
-        run_job(job)
+        app_id = run_job(job)
     except subprocess.CalledProcessError as e:
         raise click.ClickException(f"{name} exited with code {e.returncode}") from e
-    console.print(f"[bold green]✓[/bold green] Finished running {name}")
+    if app_id is None:
+        console.print(f"[bold green]✓[/bold green] Finished running {name}")
+    elif job.detach:
+        console.print(
+            f"Started {name} in the background.\n\n"
+            f"Stream logs:\n  [green]modal app logs {app_id}[/green]\n\n"
+            f"Stop the job:\n  [green]modal app stop {app_id}[/green]"
+        )
+    # Otherwise the client was interrupted, and Modal already printed how to track the job.
 
 
 @click.group()
@@ -442,6 +477,7 @@ def main():
     help="Add the given Python version to IMAGE, e.g. `3.12`. Required if IMAGE "
     "does not have Python.",
 )
+@detach_option
 @dry_run_option
 def docker_run(
     image: str,
@@ -453,6 +489,7 @@ def docker_run(
     timeout: int | None,
     retries: int,
     add_python: str | None,
+    detach: bool,
     dry_run: bool,
 ):
     """Run COMMAND in the registry image IMAGE on Modal, like `docker run`.
@@ -468,6 +505,7 @@ def docker_run(
         add_python=add_python,
         timeout=timeout,
         retries=retries,
+        detach=detach,
     )
     if dry_run:
         click.echo(format_job(job))
@@ -506,6 +544,7 @@ def uv():
 @gpu_option
 @timeout_option
 @retries_option
+@detach_option
 @dry_run_option
 def uv_run(
     command: tuple[str, ...],
@@ -516,6 +555,7 @@ def uv_run(
     gpu: str | None,
     timeout: int | None,
     retries: int,
+    detach: bool,
     dry_run: bool,
 ):
     """Run COMMAND on Modal with `uv run`.
@@ -557,6 +597,7 @@ def uv_run(
                 gpu,
                 timeout=timeout,
                 retries=retries,
+                detach=detach,
             )
         except (ValueError, tomllib.TOMLDecodeError) as e:
             raise click.ClickException(f"Invalid script metadata in {name}: {e}") from e
