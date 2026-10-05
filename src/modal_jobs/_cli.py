@@ -62,6 +62,10 @@ class JobSpec:
     detach: bool = False
 
 
+# Where the logs volume is mounted in the job's container, so users can't mount anything there.
+LOGS_DIR = "/modal-jobs-logs"
+
+
 def is_local_path(source: str) -> bool:
     """Return True if a volume source is a local path rather than a Modal volume name.
 
@@ -81,6 +85,8 @@ def parse_volume(value: str, cwd: Path | None = None) -> tuple[str | Path, str]:
         raise ValueError(f"Expected SOURCE:DEST, got {value!r}")
     if not PurePosixPath(dest).is_absolute():
         raise ValueError(f"Destination must be an absolute path, got {dest!r}")
+    if PurePosixPath(dest) == PurePosixPath(LOGS_DIR):
+        raise ValueError(f"Destination {dest!r} is reserved for the job's logs")
     if not is_local_path(source):
         return source, dest
     path = Path(source).expanduser()
@@ -369,6 +375,7 @@ def job_record(job: JobSpec, app_id: str, call_id: str) -> dict:
         "status": RUNNING,
         "exit_code": None,
         "error": None,
+        "log": f"{app_id}.log",
     }
 
 
@@ -407,7 +414,10 @@ def run_job(job: JobSpec) -> str | None:
         image = image.add_local_file(job.local_path, job.remote_path)
     for local_dir, dest in job.local_dirs:
         image = image.add_local_dir(local_dir, dest, copy=False)
+    from modal_jobs._backend import LOGS_VOLUME_NAME
+
     volumes = {dest: modal.Volume.from_name(name) for name, dest in job.volumes}
+    volumes[LOGS_DIR] = modal.Volume.from_name(LOGS_VOLUME_NAME, create_if_missing=True)
     secrets = [modal.Secret.from_name(name) for name in job.secrets]
     if job.local_secrets:
         secrets.append(modal.Secret.from_dict(dict(job.local_secrets)))
@@ -428,7 +438,8 @@ def run_job(job: JobSpec) -> str | None:
         # A detached app keeps running the job if the client disconnects, e.g. on Ctrl-C.
         finished = False
         with app.run(detach=True):
-            call = run_cmd_local.spawn(job.command)
+            log_path = f"{LOGS_DIR}/{app.app_id}.log"
+            call = run_cmd_local.spawn(job.command, log_path, LOGS_VOLUME_NAME)
             register_job(job, app.app_id, call.object_id)
             if not job.detach:
                 call.get()
@@ -566,6 +577,7 @@ def run_and_report(job: JobSpec, name: str):
         console.print(
             f"Started {name} in the background.\n\n"
             f"Stream logs:\n  [green]modal app logs {app_id}[/green]\n\n"
+            f"Show saved logs:\n  [green]modal-jobs logs {app_id}[/green]\n\n"
             f"Stop the job:\n  [green]modal app stop {app_id}[/green]"
         )
     # Otherwise the client was interrupted, and Modal already printed how to track the job.
@@ -946,22 +958,54 @@ def ls(limit: int, status: str | None):
     console.print(table)
 
 
-@main.command("show")
-@click.argument("job_id")
-def show(job_id: str):
-    """Show the details of the job JOB_ID, which may be a unique prefix."""
+def get_record(job_id: str) -> dict:
+    """Return the record of the job `job_id`, which may be a unique prefix."""
     try:
-        record = get_registry().get_job.remote(job_id)
+        return get_registry().get_job.remote(job_id)
     except KeyError as e:
         raise click.ClickException(f"No job found with ID {job_id!r}.") from e
     except ValueError as e:
         raise click.ClickException(str(e)) from e
+
+
+@main.command("show")
+@click.argument("job_id")
+def show(job_id: str):
+    """Show the details of the job JOB_ID, which may be a unique prefix."""
+    record = get_record(job_id)
     console.print(format_record(record), highlight=False)
     console.print(
         f"\nStream logs:\n  [green]modal app logs {record['id']}[/green]", highlight=False
     )
+    if record.get("log"):
+        console.print(
+            f"\nShow saved logs:\n  [green]modal-jobs logs {record['id']}[/green]", highlight=False
+        )
     if record["status"] == "running":
         console.print(f"\nStop the job:\n  [green]modal app stop {record['id']}[/green]")
+
+
+@main.command("logs")
+@click.argument("job_id")
+def logs(job_id: str):
+    """Print the saved output of the job JOB_ID, which may be a unique prefix."""
+    import modal.exception
+
+    from modal_jobs import _backend
+
+    record = get_record(job_id)
+    if not record.get("log"):
+        raise click.ClickException(
+            f"Job {record['id']} was run before logs were saved. "
+            f"Try `modal app logs {record['id']}`."
+        )
+    try:
+        output = _backend.read_log(record["id"])
+    except (FileNotFoundError, modal.exception.NotFoundError) as e:
+        raise click.ClickException(
+            f"No output was saved for job {record['id']} yet. Try `modal app logs {record['id']}`."
+        ) from e
+    click.echo(output, nl=False)
 
 
 @main.group()

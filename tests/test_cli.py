@@ -1137,3 +1137,72 @@ def test_ls_peak_memory(store):
     assert result.exit_code == 0, result.output
     assert "MEM" in result.output.splitlines()[0]
     assert "512M" in result.output.splitlines()[1]
+
+
+def test_parse_volume_logs_dir_reserved():
+    with pytest.raises(ValueError, match="reserved"):
+        parse_volume(f"my-volume:{_cli.LOGS_DIR}/")
+
+
+def test_job_record_log():
+    assert _cli.job_record(build_job(["echo", "hi"]), "ap-123", "fc-456")["log"] == "ap-123.log"
+
+
+@pytest.fixture
+def saved_logs(monkeypatch):
+    from modal_jobs import _backend
+
+    logs = {}
+
+    def read_log(job_id):
+        if job_id not in logs:
+            raise FileNotFoundError(job_id)
+        return logs[job_id]
+
+    monkeypatch.setattr(_backend, "read_log", read_log)
+    return logs
+
+
+def test_logs(store, saved_logs):
+    store.put(make_record("ap-abc", log="ap-abc.log"))
+    saved_logs["ap-abc"] = b"hello\n"
+
+    result = CliRunner().invoke(main, ["logs", "ap-a"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output == "hello\n"
+
+
+def test_logs_not_saved_yet(store, saved_logs):
+    store.put(make_record("ap-abc", log="ap-abc.log"))
+
+    result = CliRunner().invoke(main, ["logs", "ap-abc"])
+
+    assert result.exit_code == 1
+    assert "No output was saved" in result.output
+    assert "modal app logs ap-abc" in result.output
+
+
+def test_logs_before_saved_logs(store, saved_logs):
+    store.put(make_record("ap-abc"))
+
+    result = CliRunner().invoke(main, ["logs", "ap-abc"])
+
+    assert result.exit_code == 1
+    assert "before logs were saved" in result.output
+
+
+def test_logs_unknown_job(store, saved_logs):
+    result = CliRunner().invoke(main, ["logs", "ap-x"])
+
+    assert result.exit_code == 1
+    assert "No job found" in result.output
+
+
+def test_show_saved_logs_hint(store):
+    store.put(make_record("ap-abc", log="ap-abc.log"))
+
+    result = CliRunner().invoke(main, ["show", "ap-abc"])
+
+    assert result.exit_code == 0, result.output
+    assert "modal-jobs logs ap-abc" in result.output

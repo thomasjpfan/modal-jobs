@@ -272,3 +272,13 @@ def test_tracking_stopped(tracking_backend):
             break
         time.sleep(2)
     assert "Status: stopped" in result.output
+
+
+def test_tracking_saves_logs(tracking_backend):
+    script = "import sys; print('to stdout'); print('to stderr', file=sys.stderr); sys.exit(2)"
+    app_id = run_tracked(["python", "-c", script])
+    assert tracking_backend.get_job.remote(app_id)["status"] == "failed"
+    result = CliRunner().invoke(main, ["logs", app_id])
+    assert result.exit_code == 0, result.output
+    assert "to stdout" in result.output
+    assert "to stderr" in result.output

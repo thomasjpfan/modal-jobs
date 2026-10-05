@@ -14,6 +14,8 @@ from modal_jobs._store import RUNNING, JobStore, classify_outcome
 APP_NAME = "modal-jobs"
 VOLUME_NAME = "modal-jobs-db"
 DATA_DIR = "/data"
+# Each job appends its output to `<job ID>.log` on this volume.
+LOGS_VOLUME_NAME = "modal-jobs-logs"
 
 app = modal.App(APP_NAME)
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
@@ -82,3 +84,12 @@ def registry():
     cls = modal.Cls.from_name(APP_NAME, "Registry")
     cls.hydrate()
     return cls()
+
+
+def read_log(job_id: str) -> bytes:
+    """Return the saved output of the job `job_id`.
+
+    Raises `FileNotFoundError` if the job has no saved output.
+    """
+    volume = modal.Volume.from_name(LOGS_VOLUME_NAME, create_if_missing=True)
+    return b"".join(volume.read_file(f"{job_id}.log"))

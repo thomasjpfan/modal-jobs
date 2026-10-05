@@ -61,3 +61,41 @@ def test_run_cmd_failure_carries_stats():
     assert error.returncode == 1
     assert error.stats["started_at"] <= error.stats["finished_at"]
     assert "peak_memory_mib" in error.stats
+
+
+def test_run_cmd_saves_log(tmp_path, capfd):
+    log_path = tmp_path / "job.log"
+    script = "import sys; print('out'); print('err', file=sys.stderr)"
+
+    _runner.run_cmd(["python", "-c", script], str(log_path))
+
+    log = log_path.read_text()
+    assert log.startswith("--- attempt started at ")
+    assert "out\n" in log
+    assert "err\n" in log
+    out = capfd.readouterr().out
+    assert "out\n" in out
+    assert "err\n" in out
+
+
+def test_run_cmd_failure_saves_log(tmp_path):
+    log_path = tmp_path / "job.log"
+    script = "import sys; print('before failing'); sys.exit(3)"
+
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        _runner.run_cmd(["python", "-c", script], str(log_path))
+
+    assert exc_info.value.returncode == 3
+    assert "peak_memory_mib" in exc_info.value.stats
+    assert "before failing" in log_path.read_text()
+
+
+def test_run_cmd_appends_log(tmp_path):
+    log_path = tmp_path / "job.log"
+
+    _runner.run_cmd(["echo", "first"], str(log_path))
+    _runner.run_cmd(["echo", "second"], str(log_path))
+
+    log = log_path.read_text()
+    assert log.count("--- attempt started at ") == 2
+    assert log.index("first") < log.index("second")
