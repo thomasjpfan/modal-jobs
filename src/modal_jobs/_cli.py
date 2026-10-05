@@ -1,7 +1,11 @@
 import re
 import shlex
 import subprocess
+import tempfile
 import tomllib
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -157,6 +161,17 @@ def split_requirements(value: str) -> list[str]:
 def is_script(command: Sequence[str]) -> bool:
     """Return True if `command` runs a Python script, like `uv run script.py`."""
     return command[0].endswith(".py")
+
+
+def is_url(value: str) -> bool:
+    """Return True if `value` is an HTTP(S) URL, like `uv run https://.../script.py`."""
+    return value.startswith(("http://", "https://"))
+
+
+def fetch_script(url: str) -> str:
+    """Download the script at `url`."""
+    with urllib.request.urlopen(url) as response:
+        return response.read().decode("utf-8")
 
 
 def build_job(
@@ -437,21 +452,38 @@ def uv_run(
     """Run COMMAND on Modal with `uv run`.
 
     If COMMAND starts with a Python script, the script is uploaded and run with
-    its inline dependencies. Otherwise, COMMAND is run as is, e.g.
+    its inline dependencies. The script may also be a URL, which is downloaded
+    first. Otherwise, COMMAND is run as is, e.g.
     `modal-jobs uv run python -c 'print("hi")'`.
     """
-    if is_script(command):
-        path = Path(command[0])
-        if not path.is_file():
-            raise click.BadParameter(f"File {str(path)!r} does not exist.", param_hint="COMMAND")
-        name = path.name
-    else:
-        name = shlex.join(command)
-    try:
-        job = build_job(command, with_, volumes, secrets, gpu, timeout=timeout)
-    except (ValueError, tomllib.TOMLDecodeError) as e:
-        raise click.ClickException(f"Invalid script metadata in {name}: {e}") from e
-    if dry_run:
-        click.echo(format_job(job))
-        return
-    run_and_report(job, name)
+    with tempfile.TemporaryDirectory() as tmp:
+        if is_url(command[0]):
+            url = command[0]
+            if not is_script(command):
+                raise click.BadParameter(
+                    f"URL {url!r} must point to a .py script.", param_hint="COMMAND"
+                )
+            try:
+                script = fetch_script(url)
+            except (urllib.error.URLError, UnicodeDecodeError) as e:
+                raise click.ClickException(f"Could not download {url}: {e}") from e
+            local_path = Path(tmp) / PurePosixPath(urllib.parse.urlparse(url).path).name
+            local_path.write_text(script)
+            command = (str(local_path), *command[1:])
+        if is_script(command):
+            path = Path(command[0])
+            if not path.is_file():
+                raise click.BadParameter(
+                    f"File {str(path)!r} does not exist.", param_hint="COMMAND"
+                )
+            name = path.name
+        else:
+            name = shlex.join(command)
+        try:
+            job = build_job(command, with_, volumes, secrets, gpu, timeout=timeout)
+        except (ValueError, tomllib.TOMLDecodeError) as e:
+            raise click.ClickException(f"Invalid script metadata in {name}: {e}") from e
+        if dry_run:
+            click.echo(format_job(job))
+            return
+        run_and_report(job, name)

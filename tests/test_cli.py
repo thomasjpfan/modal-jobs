@@ -1,3 +1,5 @@
+import urllib.error
+
 import pytest
 from click.testing import CliRunner
 
@@ -589,3 +591,44 @@ def test_docker_run_dry_run(monkeypatch):
 def test_format_job_timeout():
     job = build_job(["echo", "hi"], timeout=600)
     assert format_job(job) == "Function: echo\nCommand: echo hi\nTimeout: 600s"
+
+
+def test_run_url(monkeypatch):
+    urls = []
+    calls = []
+    monkeypatch.setattr(_cli, "fetch_script", lambda url: urls.append(url) or UV_SCRIPT)
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+    url = "https://example.com/jobs/hello_gpu.py"
+
+    result = CliRunner().invoke(main, ["uv", "run", "--gpu", "T4", url, "--n", "3"])
+
+    assert result.exit_code == 0, result.output
+    assert urls == [url]
+    assert len(calls) == 1
+    assert calls[0].function_name == "hello_gpu"
+    assert calls[0].command == ["python", "/root/hello_gpu.py", "--n", "3"]
+    assert calls[0].dependencies == ("requests<3", "rich")
+    assert calls[0].gpu == "T4"
+    assert "Finished running hello_gpu.py" in result.output
+
+
+def test_run_url_download_error(monkeypatch):
+    def fetch_script(url):
+        raise urllib.error.URLError("boom")
+
+    monkeypatch.setattr(_cli, "fetch_script", fetch_script)
+    monkeypatch.setattr(_cli, "run_job", lambda job: None)
+
+    result = CliRunner().invoke(main, ["uv", "run", "https://example.com/job.py"])
+
+    assert result.exit_code == 1
+    assert "Could not download https://example.com/job.py" in result.output
+
+
+def test_run_url_not_script(monkeypatch):
+    monkeypatch.setattr(_cli, "run_job", lambda job: None)
+
+    result = CliRunner().invoke(main, ["uv", "run", "https://example.com/job.txt"])
+
+    assert result.exit_code == 2
+    assert "must point to a .py script" in result.output
