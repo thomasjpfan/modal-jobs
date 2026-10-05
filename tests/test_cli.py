@@ -826,3 +826,38 @@ def test_run_detach_dry_run(monkeypatch):
 
 def test_format_job_detach():
     assert "Detach" not in format_job(build_job(["echo", "hi"]))
+
+
+def test_run_stdin(monkeypatch):
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(
+        main, ["uv", "run", "--gpu", "T4", "-", "--n", "3"], input=UV_SCRIPT
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0].function_name == "stdin"
+    assert calls[0].command == ["python", "/root/stdin.py", "--n", "3"]
+    assert calls[0].dependencies == ("requests<3", "rich")
+    assert calls[0].gpu == "T4"
+    assert "Finished running stdin.py" in result.output
+
+
+def test_run_stdin_empty(monkeypatch):
+    monkeypatch.setattr(_cli, "run_job", lambda job: None)
+
+    result = CliRunner().invoke(main, ["uv", "run", "-"], input="")
+
+    assert result.exit_code == 2
+    assert "No script provided on stdin" in result.output
+
+
+def test_run_stdin_dry_run():
+    result = CliRunner().invoke(main, ["uv", "run", "--dry-run", "-", "a"], input=UV_SCRIPT)
+
+    assert result.exit_code == 0, result.output
+    assert "Function: stdin\n" in result.output
+    assert "Command: python /root/stdin.py a\n" in result.output
+    assert "Dependencies: requests<3, rich\n" in result.output

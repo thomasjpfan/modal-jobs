@@ -562,11 +562,18 @@ def uv_run(
 
     If COMMAND starts with a Python script, the script is uploaded and run with
     its inline dependencies. The script may also be a URL, which is downloaded
-    first. Otherwise, COMMAND is run as is, e.g.
+    first, or `-` to read it from stdin. Otherwise, COMMAND is run as is, e.g.
     `modal-jobs uv run python -c 'print("hi")'`.
     """
     with tempfile.TemporaryDirectory() as tmp:
-        if is_url(command[0]):
+        if command[0] == "-":
+            script = click.get_text_stream("stdin").read()
+            if not script.strip():
+                raise click.BadParameter("No script provided on stdin.", param_hint="COMMAND")
+            local_path = Path(tmp) / "stdin.py"
+            local_path.write_text(script)
+            command = (str(local_path), *command[1:])
+        elif is_url(command[0]):
             url = command[0]
             if not is_script(command):
                 raise click.BadParameter(
