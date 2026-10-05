@@ -1,4 +1,4 @@
-# Run with: modal-jobs uv run --with rich --with "requests>=2,<3" examples/03_uv_with.py
+# Run with: modal-jobs uv run --with rich --with "requests>=2,<3" examples/03_with.py
 import requests
 from rich.pretty import pprint
 

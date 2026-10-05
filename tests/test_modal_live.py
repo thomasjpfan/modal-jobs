@@ -73,12 +73,12 @@ def test_run_job_command_with(capfd):
 
 # `--with` arguments for examples that rely on them.
 EXAMPLE_WITH = {
-    "03_uv_with.py": ("rich", "requests>=2,<3"),
+    "03_with.py": ("rich", "requests>=2,<3"),
 }
 
 # `--secret` arguments for examples that rely on them.
 EXAMPLE_SECRETS = {
-    "04_uv_secret.py": (("GREETING", "hello"), ("TARGET", "modal")),
+    "04_secret.py": (("GREETING", "hello"), ("TARGET", "modal")),
 }
 
 
