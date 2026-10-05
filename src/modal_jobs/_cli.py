@@ -43,6 +43,8 @@ class JobSpec:
     gpu: str | None = None
     # Maximum run time in seconds, or None for Modal's default.
     timeout: int | None = None
+    # Total number of times to try the job; failed attempts are retried by Modal.
+    attempts: int = 1
     # Registry image to run in, e.g. `docker.io/ubuntu`, or None for `debian_slim`.
     image: str | None = None
     # Python version to add to `image`, for images without Python.
@@ -209,6 +211,7 @@ def build_job(
     image: str | None = None,
     add_python: str | None = None,
     timeout: int | None = None,
+    attempts: int = 1,
 ) -> JobSpec:
     """Build a JobSpec for `command`.
 
@@ -219,7 +222,7 @@ def build_job(
     `secrets` holds values as returned by `parse_secret`. `gpu` is the GPU type
     to request, passed to Modal as is. `image` is a registry image to run in, and
     `add_python` is a Python version to add to it. `timeout` is the maximum run
-    time in seconds.
+    time in seconds, and `attempts` is the total number of times to try the job.
     """
     extra = tuple(req for value in with_ for req in split_requirements(value))
     if image is None and is_script(command):
@@ -251,6 +254,7 @@ def build_job(
         local_secrets=local_secrets,
         gpu=gpu,
         timeout=timeout,
+        attempts=attempts,
         image=image,
         add_python=add_python,
     )
@@ -271,6 +275,8 @@ def format_job(job: JobSpec) -> str:
         lines.append(f"GPU: {job.gpu}")
     if job.timeout is not None:
         lines.append(f"Timeout: {job.timeout}s")
+    if job.attempts > 1:
+        lines.append(f"Attempts: {job.attempts}")
     for name, dest in job.volumes:
         lines.append(f"Volume: {name} -> {dest}")
     for local_dir, dest in job.local_dirs:
@@ -311,6 +317,7 @@ def run_job(job: JobSpec):
             secrets=secrets,
             gpu=job.gpu,
             timeout=job.timeout,
+            retries=job.attempts - 1 or None,
         )(run_cmd)
         with app.run():
             run_cmd_local.remote(job.command)
@@ -390,6 +397,17 @@ timeout_option = click.option(
     help="Stop the job after DURATION, e.g. `90` (seconds), `10m`, `2h`, or `1h30m`. "
     "Defaults to Modal's default of 5 minutes, up to a maximum of 24 hours.",
 )
+# Modal allows at most 10 retries.
+MAX_ATTEMPTS = 11
+attempt_option = click.option(
+    "--attempt",
+    "attempts",
+    type=click.IntRange(1, MAX_ATTEMPTS),
+    default=1,
+    metavar="N",
+    help="Try the job up to N times in total, retrying when it fails. "
+    f"Defaults to 1 (no retries), up to a maximum of {MAX_ATTEMPTS}.",
+)
 dry_run_option = click.option(
     "--dry-run",
     is_flag=True,
@@ -419,6 +437,7 @@ def main():
 @env_file_option
 @gpu_option
 @timeout_option
+@attempt_option
 @click.option(
     "--add-python",
     metavar="VERSION",
@@ -434,6 +453,7 @@ def docker_run(
     env_files: tuple[tuple[str, str], ...],
     gpu: str | None,
     timeout: int | None,
+    attempts: int,
     add_python: str | None,
     dry_run: bool,
 ):
@@ -449,6 +469,7 @@ def docker_run(
         image=image,
         add_python=add_python,
         timeout=timeout,
+        attempts=attempts,
     )
     if dry_run:
         click.echo(format_job(job))
@@ -486,6 +507,7 @@ def uv():
 @env_file_option
 @gpu_option
 @timeout_option
+@attempt_option
 @dry_run_option
 def uv_run(
     command: tuple[str, ...],
@@ -495,6 +517,7 @@ def uv_run(
     env_files: tuple[tuple[str, str], ...],
     gpu: str | None,
     timeout: int | None,
+    attempts: int,
     dry_run: bool,
 ):
     """Run COMMAND on Modal with `uv run`.
@@ -528,7 +551,15 @@ def uv_run(
         else:
             name = shlex.join(command)
         try:
-            job = build_job(command, with_, volumes, (*env_files, *secrets), gpu, timeout=timeout)
+            job = build_job(
+                command,
+                with_,
+                volumes,
+                (*env_files, *secrets),
+                gpu,
+                timeout=timeout,
+                attempts=attempts,
+            )
         except (ValueError, tomllib.TOMLDecodeError) as e:
             raise click.ClickException(f"Invalid script metadata in {name}: {e}") from e
         if dry_run:

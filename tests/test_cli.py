@@ -526,6 +526,34 @@ def test_run_timeout_invalid(command, timeout, monkeypatch):
     assert "Invalid value for '--timeout'" in result.output
 
 
+def test_run_attempt(tmp_path, monkeypatch):
+    script = tmp_path / "job.py"
+    script.write_text("print('hi')")
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(main, ["uv", "run", "--attempt", "4", str(script)])
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0].attempts == 4
+
+
+@pytest.mark.parametrize("command", [["uv", "run"], ["run"]])
+@pytest.mark.parametrize("attempts", ["0", "12", "x"])
+def test_run_attempt_invalid(command, attempts, monkeypatch):
+    monkeypatch.setattr(_cli, "run_job", lambda job: None)
+    if command == ["run"]:
+        args = [*command, "--attempt", attempts, "docker.io/ubuntu", "ls"]
+    else:
+        args = [*command, "--attempt", attempts, "ls"]
+
+    result = CliRunner().invoke(main, args)
+
+    assert result.exit_code == 2
+    assert "Invalid value for '--attempt'" in result.output
+
+
 def test_build_job_with_image(tmp_path):
     script = tmp_path / "job.py"
     script.write_text("print('hi')")
@@ -569,6 +597,8 @@ def test_docker_run_options(tmp_path, monkeypatch):
             "T4",
             "--timeout",
             "10m",
+            "--attempt",
+            "3",
             "docker.io/ubuntu",
             "ls",
             "-v",
@@ -585,6 +615,7 @@ def test_docker_run_options(tmp_path, monkeypatch):
             local_secrets=(("MY_SECRET", "value"),),
             gpu="T4",
             timeout=600,
+            attempts=3,
             image="docker.io/ubuntu",
             add_python="3.12",
         )
@@ -691,6 +722,12 @@ def test_docker_run_dry_run(monkeypatch):
 def test_format_job_timeout():
     job = build_job(["echo", "hi"], timeout=600)
     assert format_job(job) == "Function: echo\nCommand: echo hi\nTimeout: 600s"
+
+
+def test_format_job_attempts():
+    assert "Attempts" not in format_job(build_job(["echo", "hi"]))
+    job = build_job(["echo", "hi"], attempts=3)
+    assert format_job(job) == "Function: echo\nCommand: echo hi\nAttempts: 3"
 
 
 def test_run_url(monkeypatch):
