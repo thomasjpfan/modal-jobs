@@ -5,6 +5,7 @@ from modal_jobs import _cli
 from modal_jobs._cli import (
     JobSpec,
     build_job,
+    format_job,
     is_local_path,
     main,
     parse_duration,
@@ -510,3 +511,81 @@ def test_docker_run_image_without_python(monkeypatch):
     assert result.exit_code == 1
     assert "Could not find Python in docker.io/ubuntu" in result.output
     assert "--add-python" in result.output
+
+
+def test_format_job(tmp_path):
+    script = tmp_path / "job.py"
+    script.write_text(UV_SCRIPT)
+    (tmp_path / "data").mkdir()
+    job = build_job(
+        [str(script), "--name", "a b"],
+        ("pkg[a,b]",),
+        volumes=(("my-modal-volume", "/mnt/vol"), (tmp_path / "data", "/root/data")),
+        secrets=("my-modal-secret", ("MY_SECRET", "hunter2")),
+        gpu="T4",
+    )
+    assert format_job(job) == "\n".join(
+        [
+            "Function: job",
+            "Command: python /root/job.py --name 'a b'",
+            f"Script: {script} -> /root/job.py",
+            "Dependencies: requests<3, rich, pkg[a,b]",
+            "GPU: T4",
+            "Volume: my-modal-volume -> /mnt/vol",
+            f"Local directory: {tmp_path / 'data'} -> /root/data",
+            "Secret: my-modal-secret",
+            "Local secret: MY_SECRET=***",
+        ]
+    )
+
+
+def test_format_job_command():
+    job = build_job(["python", "-c", "print(1)"])
+    assert format_job(job) == "Function: python\nCommand: python -c 'print(1)'"
+
+
+def test_run_dry_run(tmp_path, monkeypatch):
+    script = tmp_path / "job.py"
+    script.write_text("print('hi')")
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(
+        main, ["uv", "run", "--dry-run", "-s", "MY_SECRET=hunter2", str(script)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == []
+    assert (
+        result.output
+        == format_job(build_job([str(script)], secrets=(("MY_SECRET", "hunter2"),))) + "\n"
+    )
+    assert "hunter2" not in result.output
+
+
+def test_format_job_image():
+    job = build_job(["echo", "hi"], image="docker.io/ubuntu", add_python="3.12")
+    assert format_job(job) == (
+        "Function: echo\nCommand: echo hi\nImage: docker.io/ubuntu\nAdd Python: 3.12"
+    )
+
+
+def test_docker_run_dry_run(monkeypatch):
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(
+        main, ["run", "--dry-run", "--add-python", "3.12", "docker.io/ubuntu", "echo", "hi"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == []
+    assert (
+        result.output
+        == format_job(build_job(["echo", "hi"], image="docker.io/ubuntu", add_python="3.12")) + "\n"
+    )
+
+
+def test_format_job_timeout():
+    job = build_job(["echo", "hi"], timeout=600)
+    assert format_job(job) == "Function: echo\nCommand: echo hi\nTimeout: 600s"

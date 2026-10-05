@@ -214,6 +214,32 @@ def build_job(
     )
 
 
+def format_job(job: JobSpec) -> str:
+    """Format the configuration of `job` for display, masking local secret values."""
+    lines = [f"Function: {job.function_name}", f"Command: {shlex.join(job.command)}"]
+    if job.image is not None:
+        lines.append(f"Image: {job.image}")
+    if job.add_python is not None:
+        lines.append(f"Add Python: {job.add_python}")
+    if job.local_path is not None:
+        lines.append(f"Script: {job.local_path} -> {job.remote_path}")
+    if job.dependencies:
+        lines.append(f"Dependencies: {', '.join(job.dependencies)}")
+    if job.gpu is not None:
+        lines.append(f"GPU: {job.gpu}")
+    if job.timeout is not None:
+        lines.append(f"Timeout: {job.timeout}s")
+    for name, dest in job.volumes:
+        lines.append(f"Volume: {name} -> {dest}")
+    for local_dir, dest in job.local_dirs:
+        lines.append(f"Local directory: {local_dir} -> {dest}")
+    for name in job.secrets:
+        lines.append(f"Secret: {name}")
+    for key, _ in job.local_secrets:
+        lines.append(f"Local secret: {key}=***")
+    return "\n".join(lines)
+
+
 def run_job(job: JobSpec):
     import modal
 
@@ -305,6 +331,11 @@ timeout_option = click.option(
     help="Stop the job after DURATION, e.g. `90` (seconds), `10m`, `2h`, or `1h30m`. "
     "Defaults to Modal's default of 5 minutes, up to a maximum of 24 hours.",
 )
+dry_run_option = click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Print the configuration of the job without running it.",
+)
 COMMAND_CONTEXT_SETTINGS = {"ignore_unknown_options": True, "allow_interspersed_args": False}
 
 
@@ -334,6 +365,7 @@ def main():
     help="Add the given Python version to IMAGE, e.g. `3.12`. Required if IMAGE "
     "does not have Python.",
 )
+@dry_run_option
 def docker_run(
     image: str,
     command: tuple[str, ...],
@@ -342,6 +374,7 @@ def docker_run(
     gpu: str | None,
     timeout: int | None,
     add_python: str | None,
+    dry_run: bool,
 ):
     """Run COMMAND in the registry image IMAGE on Modal, like `docker run`.
 
@@ -356,6 +389,9 @@ def docker_run(
         add_python=add_python,
         timeout=timeout,
     )
+    if dry_run:
+        click.echo(format_job(job))
+        return
     import modal.exception
 
     try:
@@ -388,6 +424,7 @@ def uv():
 @secret_option
 @gpu_option
 @timeout_option
+@dry_run_option
 def uv_run(
     command: tuple[str, ...],
     with_: tuple[str, ...],
@@ -395,6 +432,7 @@ def uv_run(
     secrets: tuple[str | tuple[str, str], ...],
     gpu: str | None,
     timeout: int | None,
+    dry_run: bool,
 ):
     """Run COMMAND on Modal with `uv run`.
 
@@ -413,4 +451,7 @@ def uv_run(
         job = build_job(command, with_, volumes, secrets, gpu, timeout=timeout)
     except (ValueError, tomllib.TOMLDecodeError) as e:
         raise click.ClickException(f"Invalid script metadata in {name}: {e}") from e
+    if dry_run:
+        click.echo(format_job(job))
+        return
     run_and_report(job, name)
