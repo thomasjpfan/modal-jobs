@@ -41,6 +41,10 @@ class JobSpec:
     local_secrets: tuple[tuple[str, str], ...] = ()
     # GPU type to request, e.g. `T4` or `H100:8`, passed to Modal as is.
     gpu: str | None = None
+    # Number of CPU cores to request, or None for Modal's default.
+    cpu: float | None = None
+    # Memory to request in MiB, or None for Modal's default.
+    memory: int | None = None
     # Maximum run time in seconds, or None for Modal's default.
     timeout: int | None = None
     # Number of times Modal retries the job after it fails.
@@ -151,6 +155,26 @@ def parse_duration(value: str) -> int:
     return seconds
 
 
+MEMORY_RE = re.compile(r"(?P<n>\d+)\s*(?P<unit>[MmGg]i?[Bb]?)?")
+MEMORY_UNITS = {"m": 1, "g": 1024}
+
+
+def parse_memory(value: str) -> int:
+    """Parse a memory size like `512`, `512M`, or `4G` into MiB.
+
+    A plain number is in MiB. `M` and `G` mean MiB and GiB, optionally written
+    as `Mi`, `MB`, `Gi`, or `GB`.
+    """
+    match = MEMORY_RE.fullmatch(value.strip())
+    if match is None:
+        raise ValueError(f"Expected a memory size like `512`, `512M`, or `4G`, got {value!r}")
+    unit = (match.group("unit") or "m")[0].lower()
+    mebibytes = int(match.group("n")) * MEMORY_UNITS[unit]
+    if mebibytes < 1:
+        raise ValueError(f"Memory must be at least 1 MiB, got {value!r}")
+    return mebibytes
+
+
 def parse_script_metadata(script: str) -> dict:
     """Parse the PEP 723 `script` metadata block from a Python script."""
     matches = [m for m in SCRIPT_METADATA_RE.finditer(script) if m.group("type") == "script"]
@@ -215,6 +239,8 @@ def build_job(
     timeout: int | None = None,
     retries: int = 0,
     detach: bool = False,
+    cpu: float | None = None,
+    memory: int | None = None,
 ) -> JobSpec:
     """Build a JobSpec for `command`.
 
@@ -227,6 +253,7 @@ def build_job(
     `add_python` is a Python version to add to it. `timeout` is the maximum run
     time in seconds, and `retries` is the number of times to retry the job after it fails.
     If `detach` is True, the job is started without waiting for it to finish.
+    `cpu` is the number of CPU cores and `memory` is the memory in MiB to request.
     """
     extra = tuple(req for value in with_ for req in split_requirements(value))
     if image is None and is_script(command):
@@ -257,6 +284,8 @@ def build_job(
         secrets=modal_secrets,
         local_secrets=local_secrets,
         gpu=gpu,
+        cpu=cpu,
+        memory=memory,
         timeout=timeout,
         retries=retries,
         image=image,
@@ -278,6 +307,10 @@ def format_job(job: JobSpec) -> str:
         lines.append(f"Dependencies: {', '.join(job.dependencies)}")
     if job.gpu is not None:
         lines.append(f"GPU: {job.gpu}")
+    if job.cpu is not None:
+        lines.append(f"CPU: {job.cpu:g}")
+    if job.memory is not None:
+        lines.append(f"Memory: {job.memory} MiB")
     if job.timeout is not None:
         lines.append(f"Timeout: {job.timeout}s")
     if job.retries:
@@ -330,6 +363,8 @@ def run_job(job: JobSpec) -> str | None:
             volumes=volumes,
             secrets=secrets,
             gpu=job.gpu,
+            cpu=job.cpu,
+            memory=job.memory,
             retries=job.retries or None,
             **timeout,
         )(run_cmd)
@@ -355,6 +390,15 @@ def parse_timeout(ctx, param, value: str | None) -> int | None:
         return None
     try:
         return parse_duration(value)
+    except ValueError as e:
+        raise click.BadParameter(str(e)) from e
+
+
+def parse_memory_option(ctx, param, value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return parse_memory(value)
     except ValueError as e:
         raise click.BadParameter(str(e)) from e
 
@@ -409,6 +453,18 @@ gpu_option = click.option(
     "--gpu",
     metavar="GPU",
     help="Run on a GPU, e.g. `T4`, `A100-80GB`, or `H100:8` for multiple GPUs.",
+)
+cpu_option = click.option(
+    "--cpu",
+    type=click.FloatRange(min=0, min_open=True),
+    metavar="CORES",
+    help="Request CORES CPU cores, e.g. `4` or `0.5`. Defaults to Modal's default.",
+)
+memory_option = click.option(
+    "--memory",
+    metavar="SIZE",
+    callback=parse_memory_option,
+    help="Request SIZE of memory, e.g. `512` (MiB), `512M`, or `4G`. Defaults to Modal's default.",
 )
 timeout_option = click.option(
     "--timeout",
@@ -469,6 +525,8 @@ def main():
 @secret_option
 @env_file_option
 @gpu_option
+@cpu_option
+@memory_option
 @timeout_option
 @retries_option
 @click.option(
@@ -486,6 +544,8 @@ def docker_run(
     secrets: tuple[str | tuple[str, str], ...],
     env_files: tuple[tuple[str, str], ...],
     gpu: str | None,
+    cpu: float | None,
+    memory: int | None,
     timeout: int | None,
     retries: int,
     add_python: str | None,
@@ -501,6 +561,8 @@ def docker_run(
         volumes=volumes,
         secrets=(*env_files, *secrets),
         gpu=gpu,
+        cpu=cpu,
+        memory=memory,
         image=image,
         add_python=add_python,
         timeout=timeout,
@@ -542,6 +604,8 @@ def uv():
 @secret_option
 @env_file_option
 @gpu_option
+@cpu_option
+@memory_option
 @timeout_option
 @retries_option
 @detach_option
@@ -553,6 +617,8 @@ def uv_run(
     secrets: tuple[str | tuple[str, str], ...],
     env_files: tuple[tuple[str, str], ...],
     gpu: str | None,
+    cpu: float | None,
+    memory: int | None,
     timeout: int | None,
     retries: int,
     detach: bool,
@@ -602,6 +668,8 @@ def uv_run(
                 volumes,
                 (*env_files, *secrets),
                 gpu,
+                cpu=cpu,
+                memory=memory,
                 timeout=timeout,
                 retries=retries,
                 detach=detach,

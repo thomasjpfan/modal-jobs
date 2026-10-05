@@ -12,6 +12,7 @@ from modal_jobs._cli import (
     main,
     parse_duration,
     parse_env_file,
+    parse_memory,
     parse_script_metadata,
     parse_secret,
     parse_volume,
@@ -861,3 +862,62 @@ def test_run_stdin_dry_run():
     assert "Function: stdin\n" in result.output
     assert "Command: python /root/stdin.py a\n" in result.output
     assert "Dependencies: requests<3, rich\n" in result.output
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [("512", 512), ("512M", 512), ("512Mi", 512), ("4G", 4096), ("4gb", 4096), ("2Gi", 2048)],
+)
+def test_parse_memory(value, expected):
+    assert parse_memory(value) == expected
+
+
+@pytest.mark.parametrize("value", ["", "0", "0G", "4T", "1.5G", "-1", "G"])
+def test_parse_memory_invalid(value):
+    with pytest.raises(ValueError):
+        parse_memory(value)
+
+
+def test_run_cpu_memory(tmp_path, monkeypatch):
+    script = tmp_path / "job.py"
+    script.write_text("print('hi')")
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(main, ["uv", "run", "--cpu", "2.5", "--memory", "4G", str(script)])
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0].cpu == 2.5
+    assert calls[0].memory == 4096
+
+
+def test_docker_run_cpu_memory(monkeypatch):
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(
+        main, ["run", "--cpu", "4", "--memory", "512", "docker.io/ubuntu", "echo", "hi"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls[0].cpu == 4
+    assert calls[0].memory == 512
+
+
+@pytest.mark.parametrize(
+    "args, message",
+    [(["--cpu", "0"], "--cpu"), (["--memory", "lots"], "Expected a memory size")],
+)
+def test_run_cpu_memory_invalid(monkeypatch, args, message):
+    monkeypatch.setattr(_cli, "run_job", lambda job: None)
+
+    result = CliRunner().invoke(main, ["uv", "run", *args, "echo", "hi"])
+
+    assert result.exit_code == 2
+    assert message in result.output
+
+
+def test_format_job_cpu_memory():
+    job = build_job(["echo", "hi"], cpu=0.5, memory=2048)
+    assert format_job(job) == "Function: echo\nCommand: echo hi\nCPU: 0.5\nMemory: 2048 MiB"
