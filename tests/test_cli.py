@@ -356,3 +356,72 @@ def test_run_gpu(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert len(calls) == 1
     assert calls[0].gpu == "H100:8"
+
+
+def test_build_job_with_image(tmp_path):
+    script = tmp_path / "job.py"
+    script.write_text("print('hi')")
+    job = build_job([str(script), "-x"], image="python:3.12-slim", add_python="3.12")
+    assert job == JobSpec(
+        function_name="job_py",
+        command=[str(script), "-x"],
+        image="python:3.12-slim",
+        add_python="3.12",
+    )
+
+
+def test_docker_run(monkeypatch):
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(main, ["run", "docker.io/ubuntu", "echo", "Hello from the cloud!"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [build_job(["echo", "Hello from the cloud!"], image="docker.io/ubuntu")]
+    assert "Finished running echo 'Hello from the cloud!'" in result.output
+
+
+def test_docker_run_options(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "run",
+            "--add-python",
+            "3.12",
+            "-v",
+            "./data:/data",
+            "-s",
+            "MY_SECRET=value",
+            "--gpu",
+            "T4",
+            "docker.io/ubuntu",
+            "ls",
+            "-v",
+            "--gpu",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        JobSpec(
+            function_name="ls",
+            command=["ls", "-v", "--gpu"],
+            local_dirs=((tmp_path / "data", "/data"),),
+            local_secrets=(("MY_SECRET", "value"),),
+            gpu="T4",
+            image="docker.io/ubuntu",
+            add_python="3.12",
+        )
+    ]
+
+
+@pytest.mark.parametrize("args", [["run"], ["run", "docker.io/ubuntu"]])
+def test_docker_run_missing_args(args):
+    result = CliRunner().invoke(main, args)
+    assert result.exit_code == 2
+    assert "Missing argument" in result.output

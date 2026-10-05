@@ -37,6 +37,10 @@ class JobSpec:
     local_secrets: tuple[tuple[str, str], ...] = ()
     # GPU type to request, e.g. `T4` or `H100:8`, passed to Modal as is.
     gpu: str | None = None
+    # Registry image to run in, e.g. `docker.io/ubuntu`, or None for `debian_slim`.
+    image: str | None = None
+    # Python version to add to `image`, for images without Python.
+    add_python: str | None = None
 
 
 def is_local_path(source: str) -> bool:
@@ -136,18 +140,21 @@ def build_job(
     volumes: tuple[tuple[str | Path, str], ...] = (),
     secrets: tuple[str | tuple[str, str], ...] = (),
     gpu: str | None = None,
+    image: str | None = None,
+    add_python: str | None = None,
 ) -> JobSpec:
     """Build a JobSpec for `command`.
 
-    If `command` starts with a `.py` file, that script is uploaded and run with
-    the remaining arguments. Otherwise, `command` is run as is.
+    If `image` is None and `command` starts with a `.py` file, that script is
+    uploaded and run with the remaining arguments. Otherwise, `command` is run as is.
 
     `volumes` holds `(source, dest)` pairs as returned by `parse_volume`, and
     `secrets` holds values as returned by `parse_secret`. `gpu` is the GPU type
-    to request, passed to Modal as is.
+    to request, passed to Modal as is. `image` is a registry image to run in, and
+    `add_python` is a Python version to add to it.
     """
     extra = tuple(req for value in with_ for req in split_requirements(value))
-    if is_script(command):
+    if image is None and is_script(command):
         local_path = Path(command[0]).resolve()
         remote_path = f"/root/{local_path.name}"
         metadata = parse_script_metadata(local_path.read_text())
@@ -174,6 +181,8 @@ def build_job(
         secrets=modal_secrets,
         local_secrets=local_secrets,
         gpu=gpu,
+        image=image,
+        add_python=add_python,
     )
 
 
@@ -183,7 +192,10 @@ def run_job(job: JobSpec):
     from modal_jobs import _runner
 
     app = modal.App(include_source=False)
-    image = modal.Image.debian_slim()
+    if job.image is not None:
+        image = modal.Image.from_registry(job.image, add_python=job.add_python)
+    else:
+        image = modal.Image.debian_slim()
     if job.dependencies:
         image = image.uv_pip_install(*job.dependencies)
     image = image.add_local_file(_runner.__file__, "/root/modal_jobs/_runner.py")
@@ -221,27 +233,7 @@ def parse_secrets(ctx, param, values: tuple[str, ...]) -> tuple[str | tuple[str,
         raise click.BadParameter(str(e)) from e
 
 
-@click.group()
-def main():
-    """Run jobs on Modal."""
-
-
-@main.group()
-def uv():
-    """Run jobs with uv."""
-
-
-@uv.command(context_settings={"ignore_unknown_options": True, "allow_interspersed_args": False})
-@click.argument("command", nargs=-1, required=True, type=click.UNPROCESSED)
-@click.option(
-    "--with",
-    "with_",
-    multiple=True,
-    metavar="WITH",
-    help="Run with the given packages installed. May be provided multiple times, "
-    "or as a comma-separated list.",
-)
-@click.option(
+volume_option = click.option(
     "-v",
     "--volume",
     "volumes",
@@ -252,7 +244,7 @@ def uv():
     "SOURCE to the image at DEST. SOURCE is a local directory if it starts with "
     "`.` or `~` or contains `/`. May be provided multiple times.",
 )
-@click.option(
+secret_option = click.option(
     "-s",
     "--secret",
     "--secrets",
@@ -263,12 +255,76 @@ def uv():
     help="Add the Modal secret named NAME to the container's environment, or set "
     "the environment variable KEY to VALUE as a secret. May be provided multiple times.",
 )
-@click.option(
+gpu_option = click.option(
     "--gpu",
     metavar="GPU",
     help="Run on a GPU, e.g. `T4`, `A100-80GB`, or `H100:8` for multiple GPUs.",
 )
-def run(
+COMMAND_CONTEXT_SETTINGS = {"ignore_unknown_options": True, "allow_interspersed_args": False}
+
+
+def run_and_report(job: JobSpec, name: str):
+    try:
+        run_job(job)
+    except subprocess.CalledProcessError as e:
+        raise click.ClickException(f"{name} exited with code {e.returncode}") from e
+    console.print(f"[bold green]✓[/bold green] Finished running {name}")
+
+
+@click.group()
+def main():
+    """Run jobs on Modal."""
+
+
+@main.command("run", context_settings=COMMAND_CONTEXT_SETTINGS)
+@click.argument("image")
+@click.argument("command", nargs=-1, required=True, type=click.UNPROCESSED)
+@volume_option
+@secret_option
+@gpu_option
+@click.option(
+    "--add-python",
+    metavar="VERSION",
+    help="Add the given Python version to IMAGE, e.g. `3.12`. Required if IMAGE "
+    "does not have Python.",
+)
+def docker_run(
+    image: str,
+    command: tuple[str, ...],
+    volumes: tuple[tuple[str | Path, str], ...],
+    secrets: tuple[str | tuple[str, str], ...],
+    gpu: str | None,
+    add_python: str | None,
+):
+    """Run COMMAND in the registry image IMAGE on Modal, like `docker run`.
+
+    For example, `modal-jobs run --add-python 3.12 docker.io/ubuntu echo hi`.
+    """
+    job = build_job(
+        command, volumes=volumes, secrets=secrets, gpu=gpu, image=image, add_python=add_python
+    )
+    run_and_report(job, shlex.join(command))
+
+
+@main.group()
+def uv():
+    """Run jobs with uv."""
+
+
+@uv.command("run", context_settings=COMMAND_CONTEXT_SETTINGS)
+@click.argument("command", nargs=-1, required=True, type=click.UNPROCESSED)
+@click.option(
+    "--with",
+    "with_",
+    multiple=True,
+    metavar="WITH",
+    help="Run with the given packages installed. May be provided multiple times, "
+    "or as a comma-separated list.",
+)
+@volume_option
+@secret_option
+@gpu_option
+def uv_run(
     command: tuple[str, ...],
     with_: tuple[str, ...],
     volumes: tuple[tuple[str | Path, str], ...],
@@ -292,8 +348,4 @@ def run(
         job = build_job(command, with_, volumes, secrets, gpu)
     except (ValueError, tomllib.TOMLDecodeError) as e:
         raise click.ClickException(f"Invalid script metadata in {name}: {e}") from e
-    try:
-        run_job(job)
-    except subprocess.CalledProcessError as e:
-        raise click.ClickException(f"{name} exited with code {e.returncode}") from e
-    console.print(f"[bold green]✓[/bold green] Finished running {name}")
+    run_and_report(job, name)

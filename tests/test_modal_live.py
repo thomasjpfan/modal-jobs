@@ -175,3 +175,19 @@ def test_cli_uv_run_modal_secret(tmp_path, modal_secret):
 def test_cli_uv_run_gpu():
     result = CliRunner().invoke(main, ["uv", "run", "--gpu", "T4", "nvidia-smi"])
     assert result.exit_code == 0, result.output
+
+
+def test_cli_run_image_add_python():
+    result = CliRunner().invoke(
+        main, ["run", "--add-python", "3.12", "docker.io/ubuntu", "echo", "Hello from the cloud!"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Hello from the cloud!" in result.output
+
+
+def test_cli_run_image_with_python():
+    result = CliRunner().invoke(
+        main, ["run", "python:3.12-slim", "python", "-c", "import sys; print(sys.version)"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "3.12" in result.output
