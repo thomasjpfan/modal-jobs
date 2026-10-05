@@ -31,6 +31,8 @@ SCRIPT_METADATA_RE = re.compile(
 @dataclass(frozen=True)
 class JobSpec:
     function_name: str
+    # Name to find the job by: the image's or script's name, or the one the user gave.
+    name: str
     command: list[str]
     # Script to upload and its path in the container, or None for plain commands.
     local_path: Path | None = None
@@ -233,6 +235,19 @@ def is_url(value: str) -> bool:
     return value.startswith(("http://", "https://"))
 
 
+def image_name(image: str) -> str:
+    """Return the repository name of a registry image, without its registry, tag, or digest.
+
+    For example, `docker.io/library/python:3.12-slim` is `python`.
+    """
+    image = image.partition("@")[0]
+    # A `:` before the last `/` is a registry port, not a tag.
+    repo, _, tag = image.rpartition(":")
+    if repo and "/" not in tag:
+        image = repo
+    return image.rpartition("/")[2]
+
+
 def fetch_script(url: str) -> str:
     """Download the script at `url`."""
     with urllib.request.urlopen(url) as response:
@@ -252,6 +267,7 @@ def build_job(
     detach: bool = False,
     cpu: float | None = None,
     memory: int | None = None,
+    name: str | None = None,
 ) -> JobSpec:
     """Build a JobSpec for `command`.
 
@@ -265,6 +281,8 @@ def build_job(
     time in seconds, and `retries` is the number of times to retry the job after it fails.
     If `detach` is True, the job is started without waiting for it to finish.
     `cpu` is the number of CPU cores and `memory` is the memory in MiB to request.
+    `name` is the name to find the job by, which defaults to the image's name, the
+    script's filename, or the command's program.
     """
     extra = tuple(req for value in with_ for req in split_requirements(value))
     if image is None and is_script(command):
@@ -274,11 +292,13 @@ def build_job(
         function_name = local_path.stem
         command = ["python", remote_path, *command[1:]]
         dependencies = (*metadata.get("dependencies", ()), *extra)
+        default_name = local_path.name
     else:
         local_path = remote_path = None
         function_name = re.sub(r"[^A-Za-z0-9_-]", "_", Path(command[0]).name)
         command = list(command)
         dependencies = extra
+        default_name = image_name(image) if image is not None else Path(command[0]).name
     modal_volumes = tuple((src, dest) for src, dest in volumes if not isinstance(src, Path))
     local_dirs = tuple((src, dest) for src, dest in volumes if isinstance(src, Path))
     modal_secrets = tuple(secret for secret in secrets if isinstance(secret, str))
@@ -286,6 +306,7 @@ def build_job(
     local_secrets = tuple(dict(secret for secret in secrets if not isinstance(secret, str)).items())
     return JobSpec(
         function_name=function_name,
+        name=name or default_name,
         command=command,
         local_path=local_path,
         remote_path=remote_path,
@@ -307,7 +328,11 @@ def build_job(
 
 def format_job(job: JobSpec) -> str:
     """Format the configuration of `job` for display, masking local secret values."""
-    lines = [f"Function: {job.function_name}", f"Command: {shlex.join(job.command)}"]
+    lines = [
+        f"Name: {job.name}",
+        f"Function: {job.function_name}",
+        f"Command: {shlex.join(job.command)}",
+    ]
     if job.image is not None:
         lines.append(f"Image: {job.image}")
     if job.add_python is not None:
@@ -339,13 +364,6 @@ def format_job(job: JobSpec) -> str:
     return "\n".join(lines)
 
 
-def job_name(job: JobSpec) -> str:
-    """Return a display name for `job`: its script name, or its command."""
-    if job.local_path is not None:
-        return job.local_path.name
-    return shlex.join(job.command)
-
-
 def job_record(job: JobSpec, app_id: str, call_id: str) -> dict:
     """Build the record for tracking `job`, which never includes local secret values."""
     from modal_jobs._store import RECORD_VERSION, RUNNING
@@ -354,7 +372,7 @@ def job_record(job: JobSpec, app_id: str, call_id: str) -> dict:
         "version": RECORD_VERSION,
         "id": app_id,
         "call_id": call_id,
-        "name": job_name(job),
+        "name": job.name,
         "command": job.command,
         "image": job.image,
         "add_python": job.add_python,
@@ -558,6 +576,21 @@ detach_option = click.option(
     help="Start the job and return without waiting for it to finish. "
     "The job keeps running in the background.",
 )
+
+
+def parse_name(ctx, param, value: str | None) -> str | None:
+    if value is not None and not value.strip():
+        raise click.BadParameter("Name must not be empty")
+    return value
+
+
+name_option = click.option(
+    "--name",
+    metavar="NAME",
+    callback=parse_name,
+    help="Name the job, to find it with `modal-jobs ls --name`. "
+    "Defaults to the image's name or the script's filename.",
+)
 dry_run_option = click.option(
     "--dry-run",
     is_flag=True,
@@ -606,6 +639,7 @@ def main():
     "does not have Python.",
 )
 @detach_option
+@name_option
 @dry_run_option
 def docker_run(
     image: str,
@@ -620,6 +654,7 @@ def docker_run(
     retries: int,
     add_python: str | None,
     detach: bool,
+    name: str | None,
     dry_run: bool,
 ):
     """Run COMMAND in the registry image IMAGE on Modal, like `docker run`.
@@ -638,6 +673,7 @@ def docker_run(
         timeout=timeout,
         retries=retries,
         detach=detach,
+        name=name,
     )
     if dry_run:
         click.echo(format_job(job))
@@ -679,6 +715,7 @@ def uv():
 @timeout_option
 @retries_option
 @detach_option
+@name_option
 @dry_run_option
 def uv_run(
     command: tuple[str, ...],
@@ -692,6 +729,7 @@ def uv_run(
     timeout: int | None,
     retries: int,
     detach: bool,
+    name: str | None,
     dry_run: bool,
 ):
     """Run COMMAND on Modal with `uv run`.
@@ -728,9 +766,9 @@ def uv_run(
                 raise click.BadParameter(
                     f"File {str(path)!r} does not exist.", param_hint="COMMAND"
                 )
-            name = path.name
+            display_name = path.name
         else:
-            name = shlex.join(command)
+            display_name = shlex.join(command)
         try:
             job = build_job(
                 command,
@@ -743,13 +781,14 @@ def uv_run(
                 timeout=timeout,
                 retries=retries,
                 detach=detach,
+                name=name,
             )
         except (ValueError, tomllib.TOMLDecodeError) as e:
-            raise click.ClickException(f"Invalid script metadata in {name}: {e}") from e
+            raise click.ClickException(f"Invalid script metadata in {display_name}: {e}") from e
         if dry_run:
             click.echo(format_job(job))
             return
-        run_and_report(job, name)
+        run_and_report(job, display_name)
 
 
 STATUS_STYLES = {
@@ -925,9 +964,12 @@ def get_registry():
     type=click.Choice(list(STATUS_STYLES)),
     help="Only show jobs with this status.",
 )
-def ls(limit: int, status: str | None):
+@click.option("--name", metavar="NAME", help="Only show jobs with this name.")
+def ls(limit: int, status: str | None, name: str | None):
     """List recent jobs."""
-    records = get_registry().list_jobs.remote(limit, status)
+    # Only pass `name` when set, so `ls` works with backends deployed before it existed.
+    filters = {"name": name} if name is not None else {}
+    records = get_registry().list_jobs.remote(limit, status, **filters)
     if not records:
         console.print("No jobs found.")
         return

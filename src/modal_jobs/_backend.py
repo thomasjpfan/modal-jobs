@@ -50,15 +50,18 @@ class Registry:
         volume.commit()
 
     @modal.method()
-    def list_jobs(self, limit: int | None = None, status: str | None = None) -> list[dict]:
-        # Filter after reconciling, since running jobs may have changed status.
+    def list_jobs(
+        self, limit: int | None = None, status: str | None = None, name: str | None = None
+    ) -> list[dict]:
+        # Filter by status after reconciling, since running jobs may have changed status.
+        # Names never change, so the store can filter by them.
         if status is None or status == RUNNING:
-            records = self._reconcile(self.store.list(limit, status))
+            records = self._reconcile(self.store.list(limit, status, name))
             if status is not None:
                 records = [record for record in records if record["status"] == status]
             return records
         self._reconcile(self.store.running())
-        return self.store.list(limit, status)
+        return self.store.list(limit, status, name)
 
     @modal.method()
     def get_job(self, id_or_prefix: str) -> dict:

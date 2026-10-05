@@ -40,6 +40,7 @@ def test_build_job(tmp_path):
     job = build_job([str(script)])
     assert job == JobSpec(
         function_name="job",
+        name="job.py",
         command=["python", "/root/job.py"],
         local_path=script,
         remote_path="/root/job.py",
@@ -58,6 +59,7 @@ def test_build_job_command():
     job = build_job(["python", "-c", "print(1)"], ("six",))
     assert job == JobSpec(
         function_name="python",
+        name="python",
         command=["python", "-c", "print(1)"],
         dependencies=("six",),
     )
@@ -563,6 +565,7 @@ def test_build_job_with_image(tmp_path):
     job = build_job([str(script), "-x"], image="python:3.12-slim", add_python="3.12")
     assert job == JobSpec(
         function_name="job_py",
+        name="python",
         command=[str(script), "-x"],
         image="python:3.12-slim",
         add_python="3.12",
@@ -613,6 +616,7 @@ def test_docker_run_options(tmp_path, monkeypatch):
     assert calls == [
         JobSpec(
             function_name="ls",
+            name="ubuntu",
             command=["ls", "-v", "--gpu"],
             local_dirs=((tmp_path / "data", "/data"),),
             local_secrets=(("MY_SECRET", "value"),),
@@ -662,6 +666,7 @@ def test_format_job(tmp_path):
     )
     assert format_job(job) == "\n".join(
         [
+            "Name: job.py",
             "Function: job",
             "Command: python /root/job.py --name 'a b'",
             f"Script: {script} -> /root/job.py",
@@ -677,7 +682,7 @@ def test_format_job(tmp_path):
 
 def test_format_job_command():
     job = build_job(["python", "-c", "print(1)"])
-    assert format_job(job) == "Function: python\nCommand: python -c 'print(1)'"
+    assert format_job(job) == "Name: python\nFunction: python\nCommand: python -c 'print(1)'"
 
 
 def test_run_dry_run(tmp_path, monkeypatch):
@@ -702,7 +707,7 @@ def test_run_dry_run(tmp_path, monkeypatch):
 def test_format_job_image():
     job = build_job(["echo", "hi"], image="docker.io/ubuntu", add_python="3.12")
     assert format_job(job) == (
-        "Function: echo\nCommand: echo hi\nImage: docker.io/ubuntu\nAdd Python: 3.12"
+        "Name: ubuntu\nFunction: echo\nCommand: echo hi\nImage: docker.io/ubuntu\nAdd Python: 3.12"
     )
 
 
@@ -724,13 +729,13 @@ def test_docker_run_dry_run(monkeypatch):
 
 def test_format_job_timeout():
     job = build_job(["echo", "hi"], timeout=600)
-    assert format_job(job) == "Function: echo\nCommand: echo hi\nTimeout: 600s"
+    assert format_job(job) == "Name: echo\nFunction: echo\nCommand: echo hi\nTimeout: 600s"
 
 
 def test_format_job_retries():
     assert "Retries" not in format_job(build_job(["echo", "hi"]))
     job = build_job(["echo", "hi"], retries=3)
-    assert format_job(job) == "Function: echo\nCommand: echo hi\nRetries: 3"
+    assert format_job(job) == "Name: echo\nFunction: echo\nCommand: echo hi\nRetries: 3"
 
 
 def test_run_url(monkeypatch):
@@ -824,7 +829,7 @@ def test_run_detach_dry_run(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert calls == []
-    assert result.output == "Function: echo\nCommand: echo hi\nDetach: yes\n"
+    assert result.output == "Name: echo\nFunction: echo\nCommand: echo hi\nDetach: yes\n"
 
 
 def test_format_job_detach():
@@ -922,7 +927,10 @@ def test_run_cpu_memory_invalid(monkeypatch, args, message):
 
 def test_format_job_cpu_memory():
     job = build_job(["echo", "hi"], cpu=0.5, memory=2048)
-    assert format_job(job) == "Function: echo\nCommand: echo hi\nCPU: 0.5\nMemory: 2048 MiB"
+    assert (
+        format_job(job)
+        == "Name: echo\nFunction: echo\nCommand: echo hi\nCPU: 0.5\nMemory: 2048 MiB"
+    )
 
 
 def test_job_record_masks_local_secrets(tmp_path):
@@ -942,8 +950,67 @@ def test_job_record_masks_local_secrets(tmp_path):
     assert "hunter2" not in json.dumps(record)
 
 
-def test_job_name_command():
-    assert _cli.job_name(build_job(["echo", "hi there"])) == "echo 'hi there'"
+@pytest.mark.parametrize(
+    "image, name",
+    [
+        ("ubuntu", "ubuntu"),
+        ("python:3.12-slim", "python"),
+        ("docker.io/library/python:3.12-slim", "python"),
+        ("localhost:5000/team/trainer", "trainer"),
+        ("localhost:5000/team/trainer:v2", "trainer"),
+        ("ubuntu@sha256:abc123", "ubuntu"),
+        ("ghcr.io/org/app:1.0@sha256:abc123", "app"),
+    ],
+)
+def test_image_name(image, name):
+    assert _cli.image_name(image) == name
+
+
+def test_build_job_name_command():
+    assert build_job(["/usr/bin/python3.12", "-V"]).name == "python3.12"
+
+
+def test_build_job_name_image():
+    assert build_job(["echo", "hi"], image="docker.io/library/python:3.12").name == "python"
+
+
+def test_build_job_name_override(tmp_path):
+    script = tmp_path / "job.py"
+    script.write_text("print('hi')")
+    assert build_job([str(script)], name="exp1").name == "exp1"
+    assert build_job(["echo", "hi"], image="ubuntu", name="exp1").name == "exp1"
+
+
+def test_job_record_name():
+    job = build_job(["echo", "hi"], image="docker.io/ubuntu")
+    assert _cli.job_record(job, "ap-1", "fc-1")["name"] == "ubuntu"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["run", "--name", "exp1", "docker.io/ubuntu", "echo", "hi"],
+        ["uv", "run", "--name", "exp1", "echo", "hi"],
+    ],
+)
+def test_run_name(args, monkeypatch):
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(main, args)
+
+    assert result.exit_code == 0, result.output
+    assert calls[0].name == "exp1"
+    assert calls[0].command == ["echo", "hi"]
+
+
+def test_run_empty_name(monkeypatch):
+    monkeypatch.setattr(_cli, "run_job", lambda job: None)
+
+    result = CliRunner().invoke(main, ["uv", "run", "--name", "", "echo", "hi"])
+
+    assert result.exit_code == 2
+    assert "Name must not be empty" in result.output
 
 
 def test_register_job_warns_on_failure(monkeypatch, capsys):
@@ -968,7 +1035,9 @@ class FakeRegistry:
     """A stand-in for the deployed `Registry`, backed by a local `JobStore`."""
 
     def __init__(self, store):
-        self.list_jobs = FakeMethod(lambda limit, status: store.list(limit, status))
+        self.list_jobs = FakeMethod(
+            lambda limit, status, name=None: store.list(limit, status, name)
+        )
         self.get_job = FakeMethod(store.get)
 
 
@@ -1031,6 +1100,19 @@ def test_ls_status(store):
     assert result.exit_code == 0, result.output
     assert "ap-failed" in result.output
     assert "ap-running" not in result.output
+
+
+def test_ls_name(store):
+    store.put(make_record("ap-train", name="train.py"))
+    store.put(make_record("ap-eval", name="eval.py"))
+    store.put(make_record("ap-train2", name="train.py2"))
+
+    result = CliRunner().invoke(main, ["ls", "--name", "train.py"])
+
+    assert result.exit_code == 0, result.output
+    assert "ap-train " in result.output
+    assert "ap-eval" not in result.output
+    assert "ap-train2" not in result.output
 
 
 def test_ls_empty(store):

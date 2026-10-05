@@ -75,11 +75,15 @@ class JobStore:
             raise ValueError(f"Job ID {id_or_prefix!r} is ambiguous: {', '.join(sorted(matches))}")
         return self._read(matches[0])
 
-    def list(self, limit: int | None = None, status: str | None = None) -> list[dict]:
-        """Return records newest first, optionally only those with `status`."""
+    def list(
+        self, limit: int | None = None, status: str | None = None, name: str | None = None
+    ) -> list[dict]:
+        """Return records newest first, optionally only those with `status` and `name`."""
         records = [self._read(job_id) for job_id in self._ids()]
         if status is not None:
             records = [record for record in records if record["status"] == status]
+        if name is not None:
+            records = [record for record in records if record["name"] == name]
         records.sort(key=lambda record: record["submitted_at"], reverse=True)
         return records[:limit] if limit is not None else records
 

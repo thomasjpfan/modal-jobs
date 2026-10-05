@@ -46,6 +46,17 @@ def test_list_status(tmp_path):
     assert [r["id"] for r in store.running()] == ["ap-2"]
 
 
+def test_list_name(tmp_path):
+    store = JobStore(tmp_path)
+    store.put({**make_record("ap-1", 1.0), "name": "train.py"})
+    store.put({**make_record("ap-2", 2.0), "name": "eval.py"})
+    store.put({**make_record("ap-3", 3.0), "name": "train.py"})
+    store.put({**make_record("ap-4", 4.0), "name": "eval.py"})
+    assert [r["id"] for r in store.list(name="train.py")] == ["ap-3", "ap-1"]
+    # The name filter applies before the limit.
+    assert [r["id"] for r in store.list(limit=1, name="train.py")] == ["ap-3"]
+
+
 def test_get_prefix(tmp_path):
     store = JobStore(tmp_path)
     store.put(make_record("ap-abc", 1.0))
