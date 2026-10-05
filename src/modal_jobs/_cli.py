@@ -28,6 +28,10 @@ class JobSpec:
     volumes: tuple[tuple[str, str], ...] = ()
     # (local directory, remote path) pairs to add to the image.
     local_dirs: tuple[tuple[Path, str], ...] = ()
+    # Names of Modal secrets to inject into the container's environment.
+    secrets: tuple[str, ...] = ()
+    # (name, value) pairs of local secrets to inject into the container's environment.
+    local_secrets: tuple[tuple[str, str], ...] = ()
 
 
 def is_local_path(source: str) -> bool:
@@ -58,6 +62,25 @@ def parse_volume(value: str, cwd: Path | None = None) -> tuple[str | Path, str]:
     if not path.is_dir():
         raise ValueError(f"Local directory does not exist: {source}")
     return path, dest
+
+
+ENV_VAR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def parse_secret(value: str) -> str | tuple[str, str]:
+    """Parse a `NAME` or `KEY=VALUE` secret spec.
+
+    Returns the Modal secret name as a `str`, or a `(key, value)` pair for a
+    local secret.
+    """
+    key, sep, secret_value = value.partition("=")
+    if not sep:
+        if not value:
+            raise ValueError("Secret name must not be empty")
+        return value
+    if not ENV_VAR_RE.fullmatch(key):
+        raise ValueError(f"Invalid environment variable name {key!r}")
+    return key, secret_value
 
 
 def parse_script_metadata(script: str) -> dict:
@@ -101,16 +124,20 @@ def build_job(
     path: Path,
     with_: tuple[str, ...] = (),
     volumes: tuple[tuple[str | Path, str], ...] = (),
+    secrets: tuple[str | tuple[str, str], ...] = (),
 ) -> JobSpec:
     """Build a JobSpec for the script at `path`.
 
-    `volumes` holds `(source, dest)` pairs as returned by `parse_volume`.
+    `volumes` holds `(source, dest)` pairs as returned by `parse_volume`, and
+    `secrets` holds values as returned by `parse_secret`.
     """
     remote_path = f"/root/{path.name}"
     metadata = parse_script_metadata(path.read_text())
     extra = [req for value in with_ for req in split_requirements(value)]
     modal_volumes = tuple((src, dest) for src, dest in volumes if not isinstance(src, Path))
     local_dirs = tuple((src, dest) for src, dest in volumes if isinstance(src, Path))
+    modal_secrets = tuple(secret for secret in secrets if isinstance(secret, str))
+    local_secrets = tuple(secret for secret in secrets if not isinstance(secret, str))
     return JobSpec(
         local_path=path,
         remote_path=remote_path,
@@ -119,6 +146,8 @@ def build_job(
         dependencies=(*metadata.get("dependencies", ()), *extra),
         volumes=modal_volumes,
         local_dirs=local_dirs,
+        secrets=modal_secrets,
+        local_secrets=local_secrets,
     )
 
 
@@ -136,8 +165,13 @@ def run_job(job: JobSpec):
     for local_dir, dest in job.local_dirs:
         image = image.add_local_dir(local_dir, dest, copy=False)
     volumes = {dest: modal.Volume.from_name(name) for name, dest in job.volumes}
+    secrets = [modal.Secret.from_name(name) for name in job.secrets]
+    if job.local_secrets:
+        secrets.append(modal.Secret.from_dict(dict(job.local_secrets)))
     with modal.enable_output():
-        run_cmd_local = app.function(image=image, name=job.function_name, volumes=volumes)(run_cmd)
+        run_cmd_local = app.function(
+            image=image, name=job.function_name, volumes=volumes, secrets=secrets
+        )(run_cmd)
         with app.run():
             run_cmd_local.remote(job.command)
 
@@ -145,6 +179,13 @@ def run_job(job: JobSpec):
 def parse_volumes(ctx, param, values: tuple[str, ...]) -> tuple[tuple[str | Path, str], ...]:
     try:
         return tuple(parse_volume(value) for value in values)
+    except ValueError as e:
+        raise click.BadParameter(str(e)) from e
+
+
+def parse_secrets(ctx, param, values: tuple[str, ...]) -> tuple[str | tuple[str, str], ...]:
+    try:
+        return tuple(parse_secret(value) for value in values)
     except ValueError as e:
         raise click.BadParameter(str(e)) from e
 
@@ -183,14 +224,26 @@ def uv():
     "SOURCE to the image at DEST. SOURCE is a local directory if it starts with "
     "`.` or `~` or contains `/`. May be provided multiple times.",
 )
+@click.option(
+    "-s",
+    "--secret",
+    "--secrets",
+    "secrets",
+    multiple=True,
+    metavar="NAME|KEY=VALUE",
+    callback=parse_secrets,
+    help="Add the Modal secret named NAME to the container's environment, or set "
+    "the environment variable KEY to VALUE as a secret. May be provided multiple times.",
+)
 def run(
     path: Path,
     with_: tuple[str, ...],
     volumes: tuple[tuple[str | Path, str], ...],
+    secrets: tuple[str | tuple[str, str], ...],
 ):
     """Run the Python script at PATH on Modal with `uv run`."""
     try:
-        job = build_job(path, with_, volumes)
+        job = build_job(path, with_, volumes, secrets)
     except (ValueError, tomllib.TOMLDecodeError) as e:
         raise click.ClickException(f"Invalid script metadata in {path.name}: {e}") from e
     try:

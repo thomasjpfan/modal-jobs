@@ -8,6 +8,7 @@ from modal_jobs._cli import (
     is_local_path,
     main,
     parse_script_metadata,
+    parse_secret,
     parse_volume,
     split_requirements,
 )
@@ -224,3 +225,60 @@ def test_run_volume_invalid(tmp_path, monkeypatch):
     assert result.exit_code == 2
     assert "Invalid value for '-v' / '--volume'" in result.output
     assert "absolute" in result.output
+
+
+def test_parse_secret():
+    assert parse_secret("my-modal-secret") == "my-modal-secret"
+    assert parse_secret("MY_SECRET=value") == ("MY_SECRET", "value")
+    assert parse_secret("MY_SECRET=a=b") == ("MY_SECRET", "a=b")
+    assert parse_secret("MY_SECRET=") == ("MY_SECRET", "")
+
+
+@pytest.mark.parametrize(
+    "value, match",
+    [
+        ("", "must not be empty"),
+        ("=value", "Invalid environment variable name"),
+        ("1BAD=value", "Invalid environment variable name"),
+        ("BAD-NAME=value", "Invalid environment variable name"),
+    ],
+)
+def test_parse_secret_invalid(value, match):
+    with pytest.raises(ValueError, match=match):
+        parse_secret(value)
+
+
+def test_build_job_with_secrets(tmp_path):
+    script = tmp_path / "job.py"
+    script.write_text("print('hi')")
+    job = build_job(script, secrets=("my-modal-secret", ("MY_SECRET", "value")))
+    assert job.secrets == ("my-modal-secret",)
+    assert job.local_secrets == (("MY_SECRET", "value"),)
+
+
+@pytest.mark.parametrize("flag", ["-s", "--secret", "--secrets"])
+def test_run_secret(tmp_path, monkeypatch, flag):
+    script = tmp_path / "job.py"
+    script.write_text("print('hi')")
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(
+        main, ["uv", "run", flag, "my-modal-secret", flag, "MY_SECRET=value", str(script)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0].secrets == ("my-modal-secret",)
+    assert calls[0].local_secrets == (("MY_SECRET", "value"),)
+
+
+def test_run_secret_invalid(tmp_path, monkeypatch):
+    script = tmp_path / "job.py"
+    script.write_text("print('hi')")
+    monkeypatch.setattr(_cli, "run_job", lambda job: None)
+
+    result = CliRunner().invoke(main, ["uv", "run", "-s", "BAD-NAME=value", str(script)])
+
+    assert result.exit_code == 2
+    assert "Invalid value for '-s' / '--secret' / '--secrets'" in result.output

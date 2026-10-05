@@ -64,10 +64,21 @@ EXAMPLE_WITH = {
     "03_uv_with.py": ("rich", "requests>=2,<3"),
 }
 
+# `--secret` arguments for examples that rely on them.
+EXAMPLE_SECRETS = {
+    "04_uv_secret.py": (("GREETING", "hello"), ("TARGET", "modal")),
+}
+
 
 @pytest.mark.parametrize("example", sorted(EXAMPLES_DIR.glob("*.py")), ids=lambda p: p.name)
 def test_examples(example):
-    run_job(build_job(example, EXAMPLE_WITH.get(example.name, ())))
+    run_job(
+        build_job(
+            example,
+            EXAMPLE_WITH.get(example.name, ()),
+            secrets=EXAMPLE_SECRETS.get(example.name, ()),
+        )
+    )
 
 
 def test_cli_uv_run_with(tmp_path):
@@ -108,3 +119,36 @@ def test_cli_uv_run_modal_volume(tmp_path, modal_volume):
     )
     assert result.exit_code == 0, result.output
     assert b"".join(modal_volume.read_file("out.txt")) == b"written on modal"
+
+
+def test_cli_uv_run_local_secret(tmp_path):
+    script = tmp_path / "read_secret.py"
+    script.write_text("import os\n\nassert os.environ['MY_SECRET'] == 'value=1'\n")
+    result = CliRunner().invoke(main, ["uv", "run", "-s", "MY_SECRET=value=1", str(script)])
+    assert result.exit_code == 0, result.output
+
+
+@pytest.fixture
+def modal_secret():
+    import uuid
+
+    import modal
+
+    name = f"modal-jobs-test-{uuid.uuid4().hex[:8]}"
+    modal.Secret.objects.create(name, {"MODAL_SECRET": "from modal"})
+    yield name
+    modal.Secret.objects.delete(name)
+
+
+def test_cli_uv_run_modal_secret(tmp_path, modal_secret):
+    script = tmp_path / "read_secret.py"
+    script.write_text(
+        "import os\n\n"
+        "assert os.environ['MODAL_SECRET'] == 'from modal'\n"
+        "assert os.environ['LOCAL_SECRET'] == 'local'\n"
+    )
+    result = CliRunner().invoke(
+        main,
+        ["uv", "run", "--secret", modal_secret, "--secret", "LOCAL_SECRET=local", str(script)],
+    )
+    assert result.exit_code == 0, result.output
