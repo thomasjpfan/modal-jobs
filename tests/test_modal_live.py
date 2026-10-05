@@ -76,3 +76,35 @@ def test_cli_uv_run_with(tmp_path):
     result = CliRunner().invoke(main, ["uv", "run", "--with", "six", str(script)])
     assert result.exit_code == 0, result.output
     assert "Finished running with_deps.py" in result.output
+
+
+def test_cli_uv_run_local_dir(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "hello.txt").write_text("hello from local dir\n")
+    script = tmp_path / "read_dir.py"
+    script.write_text("print(open('/root/data/hello.txt').read())\n")
+    result = CliRunner().invoke(main, ["uv", "run", "-v", "./data:/root/data", str(script)])
+    assert result.exit_code == 0, result.output
+
+
+@pytest.fixture
+def modal_volume():
+    import uuid
+
+    import modal
+
+    name = f"modal-jobs-test-{uuid.uuid4().hex[:8]}"
+    modal.Volume.objects.create(name)
+    yield modal.Volume.from_name(name)
+    modal.Volume.objects.delete(name)
+
+
+def test_cli_uv_run_modal_volume(tmp_path, modal_volume):
+    script = tmp_path / "write_vol.py"
+    script.write_text("open('/mnt/vol/out.txt', 'w').write('written on modal')\n")
+    result = CliRunner().invoke(
+        main, ["uv", "run", "--volume", f"{modal_volume.name}:/mnt/vol", str(script)]
+    )
+    assert result.exit_code == 0, result.output
+    assert b"".join(modal_volume.read_file("out.txt")) == b"written on modal"

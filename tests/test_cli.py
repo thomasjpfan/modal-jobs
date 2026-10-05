@@ -2,7 +2,15 @@ import pytest
 from click.testing import CliRunner
 
 from modal_jobs import _cli
-from modal_jobs._cli import JobSpec, build_job, main, parse_script_metadata, split_requirements
+from modal_jobs._cli import (
+    JobSpec,
+    build_job,
+    is_local_path,
+    main,
+    parse_script_metadata,
+    parse_volume,
+    split_requirements,
+)
 
 UV_SCRIPT = """\
 # /// script
@@ -124,3 +132,95 @@ def test_run_with(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert len(calls) == 1
     assert calls[0].dependencies == ("rich", "six", "requests>=2,<3")
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        ("my-modal-volume", False),
+        ("my_vol.v2", False),
+        (".", True),
+        ("./data", True),
+        ("../data", True),
+        ("~/data", True),
+        ("/abs/data", True),
+        ("data/sub", True),
+    ],
+)
+def test_is_local_path(source, expected):
+    assert is_local_path(source) == expected
+
+
+def test_parse_volume_modal_volume():
+    assert parse_volume("my-modal-volume:/mnt/vol") == ("my-modal-volume", "/mnt/vol")
+
+
+def test_parse_volume_local_dir(tmp_path):
+    (tmp_path / "data").mkdir()
+    assert parse_volume("./data:/root/data", cwd=tmp_path) == (tmp_path / "data", "/root/data")
+    assert parse_volume(f"{tmp_path}/data:/root/data") == (tmp_path / "data", "/root/data")
+
+
+@pytest.mark.parametrize(
+    "value, match",
+    [
+        ("my-modal-volume", "SOURCE:DEST"),
+        (":/mnt/vol", "SOURCE:DEST"),
+        ("vol:", "SOURCE:DEST"),
+        ("vol:mnt/vol", "absolute"),
+        ("./missing:/root/missing", "does not exist"),
+    ],
+)
+def test_parse_volume_invalid(tmp_path, value, match):
+    with pytest.raises(ValueError, match=match):
+        parse_volume(value, cwd=tmp_path)
+
+
+def test_build_job_with_volumes(tmp_path):
+    script = tmp_path / "job.py"
+    script.write_text("print('hi')")
+    job = build_job(
+        script, volumes=(("my-modal-volume", "/mnt/vol"), (tmp_path / "data", "/root/data"))
+    )
+    assert job.volumes == (("my-modal-volume", "/mnt/vol"),)
+    assert job.local_dirs == ((tmp_path / "data", "/root/data"),)
+
+
+@pytest.mark.parametrize("flag", ["-v", "--volume"])
+def test_run_volume(tmp_path, monkeypatch, flag):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "my-local-folder").mkdir()
+    script = tmp_path / "job.py"
+    script.write_text("print('hi')")
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "uv",
+            "run",
+            flag,
+            "my-modal-volume:/mnt/vol",
+            flag,
+            "./my-local-folder:/root/my-local-folder",
+            str(script),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0].volumes == (("my-modal-volume", "/mnt/vol"),)
+    assert calls[0].local_dirs == ((tmp_path / "my-local-folder", "/root/my-local-folder"),)
+
+
+def test_run_volume_invalid(tmp_path, monkeypatch):
+    script = tmp_path / "job.py"
+    script.write_text("print('hi')")
+    monkeypatch.setattr(_cli, "run_job", lambda job: None)
+
+    result = CliRunner().invoke(main, ["uv", "run", "-v", "vol:relative", str(script)])
+
+    assert result.exit_code == 2
+    assert "Invalid value for '-v' / '--volume'" in result.output
+    assert "absolute" in result.output
