@@ -1,5 +1,6 @@
 import re
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -203,3 +204,71 @@ def test_cli_uv_run_detach(tmp_path):
     match = re.search(r"modal app stop (ap-\w+)", result.output)
     assert match is not None, result.output
     subprocess.run(["modal", "app", "stop", match.group(1)], check=False)
+
+
+@pytest.fixture(scope="module")
+def tracking_backend():
+    from modal_jobs import _backend
+
+    _backend.app.deploy()
+    return _backend.registry()
+
+
+def run_tracked(args):
+    """Run `modal-jobs uv run ARGS` and return the job's app ID from Modal's output."""
+    result = CliRunner().invoke(main, ["uv", "run", *args])
+    match = re.search(r"modal\.com/apps/[^/]+/[^/]+/(ap-\w+)", result.output)
+    assert match is not None, result.output
+    return match.group(1)
+
+
+def test_tracking_succeeded(tracking_backend):
+    app_id = run_tracked(["python", "-c", "print('hi')"])
+    record = tracking_backend.get_job.remote(app_id)
+    assert record["status"] == "succeeded"
+    assert record["exit_code"] == 0
+    assert record["started_at"] <= record["finished_at"]
+    assert record["peak_memory_mib"] > 0
+    assert record["cpu_seconds"] >= 0
+    assert record["task_id"].startswith("ta-")
+    assert record["region"]
+
+
+def test_tracking_killed(tracking_backend):
+    kill = "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"
+    app_id = run_tracked(["python", "-c", kill])
+    record = tracking_backend.get_job.remote(app_id)
+    assert record["status"] == "failed"
+    assert record["exit_code"] == -9
+    result = CliRunner().invoke(main, ["show", app_id])
+    assert "killed by SIGKILL" in result.output, result.output
+
+
+def test_tracking_failed(tracking_backend, tmp_path):
+    script = tmp_path / "fail.py"
+    script.write_text("import sys\nsys.exit(3)\n")
+    app_id = run_tracked([str(script)])
+    record = tracking_backend.get_job.remote(app_id)
+    assert record["status"] == "failed"
+    assert record["exit_code"] == 3
+    assert record["name"] == "fail.py"
+
+
+def test_tracking_timed_out(tracking_backend):
+    app_id = run_tracked(["--timeout", "10", "sleep", "60"])
+    record = tracking_backend.get_job.remote(app_id)
+    assert record["status"] == "timed_out"
+
+
+def test_tracking_stopped(tracking_backend):
+    app_id = run_tracked(["--detach", "sleep", "600"])
+    assert tracking_backend.get_job.remote(app_id)["status"] == "running"
+    subprocess.run(["modal", "app", "stop", "-y", app_id], check=True)
+    # Modal takes a few seconds to report the job as terminated.
+    for _ in range(30):
+        result = CliRunner().invoke(main, ["show", app_id])
+        assert result.exit_code == 0, result.output
+        if "Status: running" not in result.output:
+            break
+        time.sleep(2)
+    assert "Status: stopped" in result.output

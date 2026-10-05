@@ -1,3 +1,5 @@
+import json
+import time
 import urllib.error
 
 import pytest
@@ -921,3 +923,217 @@ def test_run_cpu_memory_invalid(monkeypatch, args, message):
 def test_format_job_cpu_memory():
     job = build_job(["echo", "hi"], cpu=0.5, memory=2048)
     assert format_job(job) == "Function: echo\nCommand: echo hi\nCPU: 0.5\nMemory: 2048 MiB"
+
+
+def test_job_record_masks_local_secrets(tmp_path):
+    script = tmp_path / "job.py"
+    script.write_text("print('hi')")
+    job = build_job([str(script)], secrets=("my-secret", ("TOKEN", "hunter2")), gpu="T4")
+
+    record = _cli.job_record(job, "ap-123", "fc-456")
+
+    assert record["id"] == "ap-123"
+    assert record["call_id"] == "fc-456"
+    assert record["name"] == "job.py"
+    assert record["status"] == "running"
+    assert record["gpu"] == "T4"
+    assert record["secrets"] == ["my-secret"]
+    assert record["local_secret_keys"] == ["TOKEN"]
+    assert "hunter2" not in json.dumps(record)
+
+
+def test_job_name_command():
+    assert _cli.job_name(build_job(["echo", "hi there"])) == "echo 'hi there'"
+
+
+def test_register_job_warns_on_failure(monkeypatch, capsys):
+    from modal_jobs import _backend
+
+    def missing_registry():
+        raise RuntimeError("not deployed")
+
+    monkeypatch.setattr(_backend, "registry", missing_registry)
+
+    _cli.register_job(build_job(["echo", "hi"]), "ap-1", "fc-1")
+
+    assert "modal-jobs backend deploy" in capsys.readouterr().out
+
+
+class FakeMethod:
+    def __init__(self, fn):
+        self.remote = fn
+
+
+class FakeRegistry:
+    """A stand-in for the deployed `Registry`, backed by a local `JobStore`."""
+
+    def __init__(self, store):
+        self.list_jobs = FakeMethod(lambda limit, status: store.list(limit, status))
+        self.get_job = FakeMethod(store.get)
+
+
+def make_record(job_id, status="running", **fields):
+    return {
+        "id": job_id,
+        "call_id": f"fc-{job_id}",
+        "name": "job.py",
+        "command": ["python", "/root/job.py"],
+        "gpu": None,
+        "submitted_by": "me@host",
+        "submitted_at": time.time() - 90,
+        "started_at": None,
+        "finished_at": None,
+        "status": status,
+        "exit_code": None,
+        "error": None,
+        **fields,
+    }
+
+
+@pytest.fixture
+def store(tmp_path, monkeypatch):
+    from modal_jobs import _backend
+    from modal_jobs._store import JobStore
+
+    store = JobStore(tmp_path)
+    monkeypatch.setattr(_backend, "registry", lambda: FakeRegistry(store))
+    return store
+
+
+def test_ls(store):
+    store.put(make_record("ap-running", gpu="T4"))
+    store.put(
+        make_record(
+            "ap-failed",
+            status="failed",
+            exit_code=3,
+            started_at=1.0,
+            finished_at=66.0,
+            submitted_at=0.0,
+        )
+    )
+
+    result = CliRunner().invoke(main, ["ls"])
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert "ID" in lines[0] and "STATUS" in lines[0]
+    assert "ap-running" in lines[1] and "running" in lines[1] and "T4" in lines[1]
+    assert "ap-failed" in lines[2] and "failed" in lines[2] and "1m5s" in lines[2]
+
+
+def test_ls_status(store):
+    store.put(make_record("ap-running"))
+    store.put(make_record("ap-failed", status="failed"))
+
+    result = CliRunner().invoke(main, ["ls", "--status", "failed"])
+
+    assert result.exit_code == 0, result.output
+    assert "ap-failed" in result.output
+    assert "ap-running" not in result.output
+
+
+def test_ls_empty(store):
+    result = CliRunner().invoke(main, ["ls"])
+    assert result.exit_code == 0, result.output
+    assert "No jobs found." in result.output
+
+
+def test_show(store):
+    store.put(
+        make_record(
+            "ap-abc", status="failed", exit_code=3, local_secret_keys=["TOKEN"], secrets=["s"]
+        )
+    )
+
+    result = CliRunner().invoke(main, ["show", "ap-a"])
+
+    assert result.exit_code == 0, result.output
+    assert "ID: ap-abc" in result.output
+    assert "Status: failed" in result.output
+    assert "Exit code: 3" in result.output
+    assert "Local secret: TOKEN=***" in result.output
+    assert "modal app logs ap-abc" in result.output
+    assert "modal app stop" not in result.output
+
+
+@pytest.mark.parametrize("job_id, message", [("ap-x", "No job found"), ("ap-", "ambiguous")])
+def test_show_errors(store, job_id, message):
+    store.put(make_record("ap-abc"))
+    store.put(make_record("ap-abd"))
+
+    result = CliRunner().invoke(main, ["show", job_id])
+
+    assert result.exit_code == 1
+    assert message in result.output
+
+
+def test_ls_backend_not_deployed(monkeypatch):
+    import modal.exception
+
+    from modal_jobs import _backend
+
+    def missing_registry():
+        raise modal.exception.NotFoundError("App not found")
+
+    monkeypatch.setattr(_backend, "registry", missing_registry)
+
+    result = CliRunner().invoke(main, ["ls"])
+
+    assert result.exit_code == 1
+    assert "modal-jobs backend deploy" in result.output
+
+
+@pytest.mark.parametrize(
+    "seconds, expected", [(45, "45s"), (192, "3m12s"), (7500, "2h5m"), (97200, "1d3h")]
+)
+def test_format_duration(seconds, expected):
+    assert _cli.format_duration(seconds) == expected
+
+
+@pytest.mark.parametrize(
+    "fields, expected",
+    [
+        ({"exit_code": 3}, "3"),
+        ({"exit_code": -11}, "-11 (killed by SIGSEGV)"),
+        ({"exit_code": -9}, "-9 (killed by SIGKILL, possibly out of memory)"),
+        ({"exit_code": -200}, "-200 (killed by signal 200)"),
+    ],
+)
+def test_format_exit_code(fields, expected):
+    assert _cli.format_exit_code(fields) == expected
+
+
+def test_format_usage():
+    record = make_record(
+        "ap-1",
+        status="succeeded",
+        started_at=0.0,
+        finished_at=100.0,
+        cpu_seconds=150.0,
+        cpu=4,
+        peak_memory_mib=3072.0,
+        memory=4096,
+        task_id="ta-1",
+        region="us-west",
+        cloud="aws",
+    )
+    assert _cli.format_usage(record) == [
+        "Peak memory: 3.0G (75% of 4.0G requested)",
+        "CPU time: 2m30s (1.5 cores on average of 4)",
+        "Container: ta-1 (us-west, aws)",
+    ]
+
+
+def test_format_usage_without_stats():
+    assert _cli.format_usage(make_record("ap-1")) == []
+
+
+def test_ls_peak_memory(store):
+    store.put(make_record("ap-1", status="succeeded", peak_memory_mib=512.0))
+
+    result = CliRunner().invoke(main, ["ls"])
+
+    assert result.exit_code == 0, result.output
+    assert "MEM" in result.output.splitlines()[0]
+    assert "512M" in result.output.splitlines()[1]

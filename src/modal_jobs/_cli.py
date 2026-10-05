@@ -1,7 +1,11 @@
+import getpass
 import re
 import shlex
+import signal
+import socket
 import subprocess
 import tempfile
+import time
 import tomllib
 import urllib.error
 import urllib.parse
@@ -12,6 +16,7 @@ from pathlib import Path, PurePosixPath
 
 import click
 from rich.console import Console
+from rich.table import Table
 
 from modal_jobs._runner import run_cmd
 
@@ -328,6 +333,58 @@ def format_job(job: JobSpec) -> str:
     return "\n".join(lines)
 
 
+def job_name(job: JobSpec) -> str:
+    """Return a display name for `job`: its script name, or its command."""
+    if job.local_path is not None:
+        return job.local_path.name
+    return shlex.join(job.command)
+
+
+def job_record(job: JobSpec, app_id: str, call_id: str) -> dict:
+    """Build the record for tracking `job`, which never includes local secret values."""
+    from modal_jobs._store import RECORD_VERSION, RUNNING
+
+    return {
+        "version": RECORD_VERSION,
+        "id": app_id,
+        "call_id": call_id,
+        "name": job_name(job),
+        "command": job.command,
+        "image": job.image,
+        "add_python": job.add_python,
+        "dependencies": list(job.dependencies),
+        "gpu": job.gpu,
+        "cpu": job.cpu,
+        "memory": job.memory,
+        "timeout": job.timeout,
+        "retries": job.retries,
+        "volumes": [list(volume) for volume in job.volumes],
+        "local_dirs": [[str(local_dir), dest] for local_dir, dest in job.local_dirs],
+        "secrets": list(job.secrets),
+        "local_secret_keys": [key for key, _ in job.local_secrets],
+        "submitted_by": f"{getpass.getuser()}@{socket.gethostname()}",
+        "submitted_at": time.time(),
+        "started_at": None,
+        "finished_at": None,
+        "status": RUNNING,
+        "exit_code": None,
+        "error": None,
+    }
+
+
+def register_job(job: JobSpec, app_id: str, call_id: str) -> None:
+    """Record `job` with the backend, warning instead of failing if that doesn't work."""
+    from modal_jobs import _backend
+
+    try:
+        _backend.registry().create_job.remote(job_record(job, app_id, call_id))
+    # Tracking must never stop the job from running.
+    except Exception as e:  # noqa: BLE001
+        console.print(
+            f"[dim]Job not tracked ({type(e).__name__}). Run `modal-jobs backend deploy`.[/dim]"
+        )
+
+
 def run_job(job: JobSpec) -> str | None:
     """Run `job` on Modal.
 
@@ -372,6 +429,7 @@ def run_job(job: JobSpec) -> str | None:
         finished = False
         with app.run(detach=True):
             call = run_cmd_local.spawn(job.command)
+            register_job(job, app.app_id, call.object_id)
             if not job.detach:
                 call.get()
                 finished = True
@@ -680,3 +738,244 @@ def uv_run(
             click.echo(format_job(job))
             return
         run_and_report(job, name)
+
+
+STATUS_STYLES = {
+    "running": "yellow",
+    "succeeded": "green",
+    "failed": "red",
+    "timed_out": "red",
+    "stopped": "dim",
+    "unknown": "dim",
+}
+
+
+def format_duration(seconds: float) -> str:
+    """Format `seconds` like `45s`, `3m12s`, `2h5m`, or `1d3h`."""
+    seconds = int(seconds)
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    if days:
+        return f"{days}d{hours}h"
+    if hours:
+        return f"{hours}h{minutes}m"
+    if minutes:
+        return f"{minutes}m{seconds}s"
+    return f"{seconds}s"
+
+
+def record_duration(record: dict, now: float | None = None) -> str:
+    """Return how long the job of `record` ran, or has been running, or `-` if unknown."""
+    started_at = record.get("started_at")
+    if record["status"] == "running":
+        # The start time is only known once the job finishes, so count from submission.
+        started_at = record["submitted_at"]
+        finished_at = time.time() if now is None else now
+    else:
+        finished_at = record.get("finished_at")
+    if started_at is None or finished_at is None:
+        return "-"
+    return format_duration(max(finished_at - started_at, 0))
+
+
+def format_status(status: str) -> str:
+    style = STATUS_STYLES.get(status, "")
+    return f"[{style}]{status}[/{style}]" if style else status
+
+
+def format_timestamp(timestamp: float | None) -> str:
+    if timestamp is None:
+        return "-"
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+
+
+def format_memory(mebibytes: float) -> str:
+    """Format a memory size in MiB like `512M` or `3.9G`."""
+    if mebibytes < 1024:
+        return f"{mebibytes:.0f}M"
+    return f"{mebibytes / 1024:.1f}G"
+
+
+def format_exit_code(record: dict) -> str:
+    """Format the exit code of `record`, naming the signal that killed the job, if any."""
+    code = record["exit_code"]
+    if code >= 0:
+        return str(code)
+    try:
+        name = signal.Signals(-code).name
+    except ValueError:
+        return f"{code} (killed by signal {-code})"
+    # The kernel's out-of-memory killer sends SIGKILL. `--memory` is only a request,
+    # so peak memory can't confirm it.
+    if name == "SIGKILL":
+        return f"{code} (killed by {name}, possibly out of memory)"
+    return f"{code} (killed by {name})"
+
+
+def format_usage(record: dict) -> list[str]:
+    """Format the resource usage and location of the job of `record`."""
+    lines = []
+    peak = record.get("peak_memory_mib")
+    if peak is not None:
+        line = f"Peak memory: {format_memory(peak)}"
+        if record.get("memory"):
+            line += (
+                f" ({peak / record['memory']:.0%} of {format_memory(record['memory'])} requested)"
+            )
+        lines.append(line)
+    cpu_seconds = record.get("cpu_seconds")
+    if cpu_seconds is not None:
+        line = f"CPU time: {format_duration(cpu_seconds)}"
+        wall = (record.get("finished_at") or 0) - (record.get("started_at") or 0)
+        if wall > 0:
+            line += f" ({cpu_seconds / wall:.1f} cores on average"
+            line += f" of {record['cpu']:g})" if record.get("cpu") else ")"
+        lines.append(line)
+    if record.get("task_id"):
+        where = ", ".join(value for value in (record.get("region"), record.get("cloud")) if value)
+        lines.append(f"Container: {record['task_id']}" + (f" ({where})" if where else ""))
+    return lines
+
+
+def format_record(record: dict) -> str:
+    """Format a job record for display, in the same style as `format_job`."""
+    lines = [
+        f"ID: {record['id']}",
+        f"Name: {record['name']}",
+        f"Status: {format_status(record['status'])}",
+    ]
+    if record.get("exit_code") is not None:
+        lines.append(f"Exit code: {format_exit_code(record)}")
+    if record.get("error"):
+        lines.append(f"Error: {record['error']}")
+    lines += format_usage(record)
+    lines.append(f"Command: {shlex.join(record['command'])}")
+    if record.get("image"):
+        lines.append(f"Image: {record['image']}")
+    if record.get("add_python"):
+        lines.append(f"Add Python: {record['add_python']}")
+    if record.get("dependencies"):
+        lines.append(f"Dependencies: {', '.join(record['dependencies'])}")
+    if record.get("gpu"):
+        lines.append(f"GPU: {record['gpu']}")
+    if record.get("cpu") is not None:
+        lines.append(f"CPU: {record['cpu']:g}")
+    if record.get("memory") is not None:
+        lines.append(f"Memory: {record['memory']} MiB")
+    if record.get("timeout") is not None:
+        lines.append(f"Timeout: {record['timeout']}s")
+    if record.get("retries"):
+        lines.append(f"Retries: {record['retries']}")
+    for name, dest in record.get("volumes", ()):
+        lines.append(f"Volume: {name} -> {dest}")
+    for local_dir, dest in record.get("local_dirs", ()):
+        lines.append(f"Local directory: {local_dir} -> {dest}")
+    for name in record.get("secrets", ()):
+        lines.append(f"Secret: {name}")
+    for key in record.get("local_secret_keys", ()):
+        lines.append(f"Local secret: {key}=***")
+    lines += [
+        f"Submitted by: {record['submitted_by']}",
+        f"Submitted: {format_timestamp(record['submitted_at'])}",
+        f"Started: {format_timestamp(record.get('started_at'))}",
+        f"Finished: {format_timestamp(record.get('finished_at'))}",
+        f"Duration: {record_duration(record)}",
+    ]
+    return "\n".join(lines)
+
+
+def get_registry():
+    """Return the deployed `Registry`, or fail with a hint to deploy it."""
+    import modal.exception
+
+    from modal_jobs import _backend
+
+    try:
+        return _backend.registry()
+    except modal.exception.NotFoundError as e:
+        raise click.ClickException(
+            "The modal-jobs backend is not deployed. Deploy it with `modal-jobs backend deploy`."
+        ) from e
+
+
+@main.command("ls")
+@click.option(
+    "-n",
+    "--limit",
+    type=click.IntRange(min=1),
+    default=20,
+    show_default=True,
+    help="Show at most this many jobs, newest first.",
+)
+@click.option(
+    "--status",
+    type=click.Choice(list(STATUS_STYLES)),
+    help="Only show jobs with this status.",
+)
+def ls(limit: int, status: str | None):
+    """List recent jobs."""
+    records = get_registry().list_jobs.remote(limit, status)
+    if not records:
+        console.print("No jobs found.")
+        return
+    now = time.time()
+    rows = [
+        (
+            record["id"],
+            record["name"],
+            record["status"],
+            f"{format_duration(now - record['submitted_at'])} ago",
+            record_duration(record, now),
+            format_memory(record["peak_memory_mib"]) if record.get("peak_memory_mib") else "-",
+            record.get("gpu") or "-",
+        )
+        for record in records
+    ]
+    headers = ("ID", "NAME", "STATUS", "SUBMITTED", "DURATION", "MEM", "GPU")
+    widths = [max(len(header), *(len(row[i]) for row in rows)) for i, header in enumerate(headers)]
+    # Shorten only the name when space is tight, since IDs are needed in full for `show`.
+    gaps = 2 * (len(headers) - 1)
+    others = sum(widths) - widths[1]
+    widths[1] = max(min(widths[1], 40, console.width - others - gaps), len("NAME"))
+    table = Table(box=None, pad_edge=False)
+    for header, width in zip(headers, widths):
+        table.add_column(header, no_wrap=True, overflow="ellipsis", width=width)
+    for row in rows:
+        table.add_row(row[0], row[1], format_status(row[2]), *row[3:])
+    console.print(table)
+
+
+@main.command("show")
+@click.argument("job_id")
+def show(job_id: str):
+    """Show the details of the job JOB_ID, which may be a unique prefix."""
+    try:
+        record = get_registry().get_job.remote(job_id)
+    except KeyError as e:
+        raise click.ClickException(f"No job found with ID {job_id!r}.") from e
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    console.print(format_record(record), highlight=False)
+    console.print(
+        f"\nStream logs:\n  [green]modal app logs {record['id']}[/green]", highlight=False
+    )
+    if record["status"] == "running":
+        console.print(f"\nStop the job:\n  [green]modal app stop {record['id']}[/green]")
+
+
+@main.group()
+def backend():
+    """Manage the modal-jobs backend that tracks jobs."""
+
+
+@backend.command("deploy")
+def backend_deploy():
+    """Deploy or update the backend app that tracks jobs."""
+    import modal
+
+    from modal_jobs import _backend
+
+    with modal.enable_output():
+        _backend.app.deploy()
+    console.print(f"[bold green]✓[/bold green] Deployed the {_backend.APP_NAME} backend")
