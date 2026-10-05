@@ -11,6 +11,7 @@ from modal_jobs._cli import (
     is_local_path,
     main,
     parse_duration,
+    parse_env_file,
     parse_script_metadata,
     parse_secret,
     parse_volume,
@@ -376,6 +377,105 @@ def test_run_secret_invalid(tmp_path, monkeypatch):
 
     assert result.exit_code == 2
     assert "Invalid value for '-s' / '--secret' / '--secrets'" in result.output
+
+
+def test_parse_env_file(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        """\
+# comment
+FOO=bar
+
+export EXPORTED=1
+  SPACED = value with spaces  
+DOUBLE="quoted # not a comment"
+SINGLE='single'
+INLINE=value # comment
+EMPTY=
+EQUALS=a=b
+"""
+    )
+    assert parse_env_file(env_file) == [
+        ("FOO", "bar"),
+        ("EXPORTED", "1"),
+        ("SPACED", "value with spaces"),
+        ("DOUBLE", "quoted # not a comment"),
+        ("SINGLE", "single"),
+        ("INLINE", "value"),
+        ("EMPTY", ""),
+        ("EQUALS", "a=b"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "content, match",
+    [
+        ("FOO=bar\nNO_EQUALS\n", r":2: Expected KEY=VALUE"),
+        ("BAD-NAME=value\n", r":1: Invalid environment variable name"),
+    ],
+)
+def test_parse_env_file_invalid(tmp_path, content, match):
+    env_file = tmp_path / ".env"
+    env_file.write_text(content)
+    with pytest.raises(ValueError, match=match):
+        parse_env_file(env_file)
+
+
+def test_build_job_local_secrets_last_wins():
+    job = build_job(["echo"], secrets=(("A", "1"), ("B", "2"), ("A", "3")))
+    assert job.local_secrets == (("A", "3"), ("B", "2"))
+
+
+@pytest.mark.parametrize(
+    "command, args",
+    [(["uv", "run"], ["echo", "hi"]), (["run"], ["docker.io/ubuntu", "echo", "hi"])],
+)
+def test_run_env_file(tmp_path, monkeypatch, command, args):
+    (tmp_path / "a.env").write_text("FOO=from-a\nBAR=from-a\n")
+    (tmp_path / "b.env").write_text("BAR=from-b\nBAZ=from-b\n")
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            *command,
+            "--env-file",
+            str(tmp_path / "a.env"),
+            "--env-file",
+            str(tmp_path / "b.env"),
+            "-s",
+            "BAZ=from-flag",
+            *args,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0].local_secrets == (("FOO", "from-a"), ("BAR", "from-b"), ("BAZ", "from-flag"))
+
+
+def test_run_env_file_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(_cli, "run_job", lambda job: None)
+
+    result = CliRunner().invoke(
+        main, ["uv", "run", "--env-file", str(tmp_path / "missing.env"), "echo", "hi"]
+    )
+
+    assert result.exit_code == 2
+    assert "does not exist" in result.output
+
+
+def test_run_env_file_invalid(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text("NO_EQUALS\n")
+    monkeypatch.setattr(_cli, "run_job", lambda job: None)
+
+    result = CliRunner().invoke(main, ["uv", "run", "--env-file", str(env_file), "echo", "hi"])
+
+    assert result.exit_code == 2
+    assert "Invalid value for '--env-file'" in result.output
+    assert "Expected KEY=VALUE" in result.output
 
 
 def test_build_job_with_gpu(tmp_path):

@@ -98,6 +98,32 @@ def parse_secret(value: str) -> str | tuple[str, str]:
     return key, secret_value
 
 
+def parse_env_file(path: Path) -> list[tuple[str, str]]:
+    """Parse a `.env` file into `(key, value)` pairs.
+
+    Each line is `KEY=VALUE`, optionally prefixed with `export`. Blank lines and
+    lines starting with `#` are ignored. Values may be wrapped in single or double
+    quotes, and unquoted values end at an inline ` #` comment.
+    """
+    pairs = []
+    for lineno, line in enumerate(path.read_text().splitlines(), start=1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.removeprefix("export ").partition("=")
+        key, value = key.strip(), value.strip()
+        if not sep:
+            raise ValueError(f"{path}:{lineno}: Expected KEY=VALUE, got {line!r}")
+        if not ENV_VAR_RE.fullmatch(key):
+            raise ValueError(f"{path}:{lineno}: Invalid environment variable name {key!r}")
+        if len(value) >= 2 and value[0] in "'\"" and value[-1] == value[0]:
+            value = value[1:-1]
+        else:
+            value = value.split(" #", 1)[0].rstrip()
+        pairs.append((key, value))
+    return pairs
+
+
 DURATION_RE = re.compile(r"(?:(?P<d>\d+)d)?(?:(?P<h>\d+)h)?(?:(?P<m>\d+)m)?(?:(?P<s>\d+)s)?")
 DURATION_UNITS = {"d": 86400, "h": 3600, "m": 60, "s": 1}
 # Modal's maximum function timeout.
@@ -211,7 +237,8 @@ def build_job(
     modal_volumes = tuple((src, dest) for src, dest in volumes if not isinstance(src, Path))
     local_dirs = tuple((src, dest) for src, dest in volumes if isinstance(src, Path))
     modal_secrets = tuple(secret for secret in secrets if isinstance(secret, str))
-    local_secrets = tuple(secret for secret in secrets if not isinstance(secret, str))
+    # Later local secrets override earlier ones with the same key.
+    local_secrets = tuple(dict(secret for secret in secrets if not isinstance(secret, str)).items())
     return JobSpec(
         function_name=function_name,
         command=command,
@@ -305,6 +332,13 @@ def parse_timeout(ctx, param, value: str | None) -> int | None:
         raise click.BadParameter(str(e)) from e
 
 
+def parse_env_files(ctx, param, values: tuple[Path, ...]) -> tuple[tuple[str, str], ...]:
+    try:
+        return tuple(pair for value in values for pair in parse_env_file(value))
+    except ValueError as e:
+        raise click.BadParameter(str(e)) from e
+
+
 def parse_secrets(ctx, param, values: tuple[str, ...]) -> tuple[str | tuple[str, str], ...]:
     try:
         return tuple(parse_secret(value) for value in values)
@@ -333,6 +367,16 @@ secret_option = click.option(
     callback=parse_secrets,
     help="Add the Modal secret named NAME to the container's environment, or set "
     "the environment variable KEY to VALUE as a secret. May be provided multiple times.",
+)
+env_file_option = click.option(
+    "--env-file",
+    "env_files",
+    multiple=True,
+    metavar="PATH",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    callback=parse_env_files,
+    help="Set the environment variables in the `.env` file PATH as secrets. "
+    "`--secret KEY=VALUE` takes precedence. May be provided multiple times.",
 )
 gpu_option = click.option(
     "--gpu",
@@ -372,6 +416,7 @@ def main():
 @click.argument("command", nargs=-1, required=True, type=click.UNPROCESSED)
 @volume_option
 @secret_option
+@env_file_option
 @gpu_option
 @timeout_option
 @click.option(
@@ -386,6 +431,7 @@ def docker_run(
     command: tuple[str, ...],
     volumes: tuple[tuple[str | Path, str], ...],
     secrets: tuple[str | tuple[str, str], ...],
+    env_files: tuple[tuple[str, str], ...],
     gpu: str | None,
     timeout: int | None,
     add_python: str | None,
@@ -398,7 +444,7 @@ def docker_run(
     job = build_job(
         command,
         volumes=volumes,
-        secrets=secrets,
+        secrets=(*env_files, *secrets),
         gpu=gpu,
         image=image,
         add_python=add_python,
@@ -437,6 +483,7 @@ def uv():
 )
 @volume_option
 @secret_option
+@env_file_option
 @gpu_option
 @timeout_option
 @dry_run_option
@@ -445,6 +492,7 @@ def uv_run(
     with_: tuple[str, ...],
     volumes: tuple[tuple[str | Path, str], ...],
     secrets: tuple[str | tuple[str, str], ...],
+    env_files: tuple[tuple[str, str], ...],
     gpu: str | None,
     timeout: int | None,
     dry_run: bool,
@@ -480,7 +528,7 @@ def uv_run(
         else:
             name = shlex.join(command)
         try:
-            job = build_job(command, with_, volumes, secrets, gpu, timeout=timeout)
+            job = build_job(command, with_, volumes, (*env_files, *secrets), gpu, timeout=timeout)
         except (ValueError, tomllib.TOMLDecodeError) as e:
             raise click.ClickException(f"Invalid script metadata in {name}: {e}") from e
         if dry_run:
