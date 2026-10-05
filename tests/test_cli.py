@@ -425,3 +425,20 @@ def test_docker_run_missing_args(args):
     result = CliRunner().invoke(main, args)
     assert result.exit_code == 2
     assert "Missing argument" in result.output
+
+
+def test_docker_run_image_without_python(monkeypatch):
+    import modal.exception
+
+    def run_job(job):
+        raise modal.exception.ConflictError(
+            "We were unable to determine the version of Python installed in the Image"
+        )
+
+    monkeypatch.setattr(_cli, "run_job", run_job)
+
+    result = CliRunner().invoke(main, ["run", "docker.io/ubuntu", "echo", "hi"])
+
+    assert result.exit_code == 1
+    assert "Could not find Python in docker.io/ubuntu" in result.output
+    assert "--add-python" in result.output

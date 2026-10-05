@@ -303,7 +303,17 @@ def docker_run(
     job = build_job(
         command, volumes=volumes, secrets=secrets, gpu=gpu, image=image, add_python=add_python
     )
-    run_and_report(job, shlex.join(command))
+    import modal.exception
+
+    try:
+        run_and_report(job, shlex.join(command))
+    except modal.exception.ConflictError as e:
+        if add_python is not None or "version of Python" not in str(e):
+            raise
+        raise click.ClickException(
+            f"Could not find Python in {image}. Add it with `--add-python`, "
+            "e.g. `--add-python 3.12`."
+        ) from e
 
 
 @main.group()
