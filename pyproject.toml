@@ -28,5 +28,6 @@ target-version = "py311"
 [tool.poe.tasks]
 lint = "ruff check ."
 test = "pytest"
+test-live = "pytest --run-modal -m modal -v"
 format = [{ cmd = "ruff format ." }, { cmd = "ruff check --fix ." }]
 check = [{ cmd = "ruff format --check ." }, { ref = "lint" }, { ref = "test" }]

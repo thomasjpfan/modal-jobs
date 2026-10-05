@@ -1,4 +1,5 @@
 import re
+import subprocess
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -89,5 +90,8 @@ def run(path: Path):
         job = build_job(path)
     except (ValueError, tomllib.TOMLDecodeError) as e:
         raise click.ClickException(f"Invalid script metadata in {path.name}: {e}") from e
-    run_job(job)
+    try:
+        run_job(job)
+    except subprocess.CalledProcessError as e:
+        raise click.ClickException(f"{path.name} exited with code {e.returncode}") from e
     console.print(f"[bold green]✓[/bold green] Finished running {path.name}")
