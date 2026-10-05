@@ -203,7 +203,7 @@ def test_cli_uv_run_detach(tmp_path):
     assert "Started hello.py in the background" in result.output
     match = re.search(r"modal-jobs stop (ap-\w+)", result.output)
     assert match is not None, result.output
-    subprocess.run(["modal", "app", "stop", match.group(1)], check=False)
+    subprocess.run(["modal", "app", "stop", "-y", match.group(1)], check=False)
 
 
 @pytest.fixture(scope="module")
@@ -215,11 +215,16 @@ def tracking_backend():
 
 
 def run_tracked(args):
-    """Run `modal-jobs uv run ARGS` and return the job's app ID from Modal's output."""
-    result = CliRunner().invoke(main, ["uv", "run", *args])
-    match = re.search(r"modal\.com/apps/[^/]+/[^/]+/(ap-\w+)", result.output)
-    assert match is not None, result.output
-    return match.group(1)
+    """Run `modal-jobs uv run ARGS` and return the job's app ID."""
+    from unittest import mock
+
+    from modal_jobs import _cli
+
+    # Modal's output wraps long URLs mid-ID, so take the ID the job was registered with.
+    with mock.patch.object(_cli, "register_job", wraps=_cli.register_job) as register_job:
+        result = CliRunner().invoke(main, ["uv", "run", *args])
+    assert register_job.call_count == 1, result.output
+    return register_job.call_args.args[1]
 
 
 def test_tracking_succeeded(tracking_backend):
