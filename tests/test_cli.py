@@ -1636,3 +1636,29 @@ def test_backend_status_not_deployed(monkeypatch):
 
     assert result.exit_code == 1
     assert "modal-jobs backend deploy" in result.output
+
+
+def test_delete_logs_skips_missing(monkeypatch):
+    import modal
+    import modal.exception
+
+    from modal_jobs import _backend
+
+    class FakeVolume:
+        def __init__(self):
+            self.files = {"ap-a.log", "ap-b.log"}
+
+        def listdir(self, path):
+            return [type("Entry", (), {"path": name}) for name in self.files]
+
+        def remove_file(self, path):
+            if path not in self.files:
+                raise modal.exception.InvalidError("No such file or directory.")
+            self.files.remove(path)
+
+    volume = FakeVolume()
+    monkeypatch.setattr(modal.Volume, "from_name", lambda *args, **kwargs: volume)
+
+    _backend.delete_logs(["ap-a", "ap-missing"])
+
+    assert volume.files == {"ap-b.log"}

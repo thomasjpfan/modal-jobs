@@ -134,11 +134,11 @@ def read_log(job_id: str) -> bytes:
 def delete_logs(job_ids: list[str]) -> None:
     """Delete the saved output of the jobs `job_ids`, skipping jobs without any."""
     volume = modal.Volume.from_name(LOGS_VOLUME_NAME, create_if_missing=True)
+    # Removing a missing file raises a generic `InvalidError`, so only remove saved ones.
+    saved = {entry.path for entry in volume.listdir("/")}
     for job_id in job_ids:
-        try:
+        if f"{job_id}.log" in saved:
             volume.remove_file(f"{job_id}.log")
-        except FileNotFoundError:
-            pass
 
 
 def logs_usage() -> tuple[int, int]:
