@@ -81,6 +81,11 @@ EXAMPLE_SECRETS = {
     "04_secret.py": (("GREETING", "hello"), ("TARGET", "modal")),
 }
 
+# `--gpu` arguments for examples that rely on them.
+EXAMPLE_GPU = {
+    "05_gpu.py": "T4",
+}
+
 
 @pytest.mark.parametrize("example", sorted(EXAMPLES_DIR.glob("*.py")), ids=lambda p: p.name)
 def test_examples(example):
@@ -89,6 +94,7 @@ def test_examples(example):
             [str(example)],
             EXAMPLE_WITH.get(example.name, ()),
             secrets=EXAMPLE_SECRETS.get(example.name, ()),
+            gpu=EXAMPLE_GPU.get(example.name),
         )
     )
 
@@ -163,4 +169,9 @@ def test_cli_uv_run_modal_secret(tmp_path, modal_secret):
         main,
         ["uv", "run", "--secret", modal_secret, "--secret", "LOCAL_SECRET=local", str(script)],
     )
+    assert result.exit_code == 0, result.output
+
+
+def test_cli_uv_run_gpu():
+    result = CliRunner().invoke(main, ["uv", "run", "--gpu", "T4", "nvidia-smi"])
     assert result.exit_code == 0, result.output

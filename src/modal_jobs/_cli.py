@@ -35,6 +35,8 @@ class JobSpec:
     secrets: tuple[str, ...] = ()
     # (name, value) pairs of local secrets to inject into the container's environment.
     local_secrets: tuple[tuple[str, str], ...] = ()
+    # GPU type to request, e.g. `T4` or `H100:8`, passed to Modal as is.
+    gpu: str | None = None
 
 
 def is_local_path(source: str) -> bool:
@@ -133,6 +135,7 @@ def build_job(
     with_: tuple[str, ...] = (),
     volumes: tuple[tuple[str | Path, str], ...] = (),
     secrets: tuple[str | tuple[str, str], ...] = (),
+    gpu: str | None = None,
 ) -> JobSpec:
     """Build a JobSpec for `command`.
 
@@ -140,7 +143,8 @@ def build_job(
     the remaining arguments. Otherwise, `command` is run as is.
 
     `volumes` holds `(source, dest)` pairs as returned by `parse_volume`, and
-    `secrets` holds values as returned by `parse_secret`.
+    `secrets` holds values as returned by `parse_secret`. `gpu` is the GPU type
+    to request, passed to Modal as is.
     """
     extra = tuple(req for value in with_ for req in split_requirements(value))
     if is_script(command):
@@ -169,6 +173,7 @@ def build_job(
         local_dirs=local_dirs,
         secrets=modal_secrets,
         local_secrets=local_secrets,
+        gpu=gpu,
     )
 
 
@@ -192,7 +197,11 @@ def run_job(job: JobSpec):
         secrets.append(modal.Secret.from_dict(dict(job.local_secrets)))
     with modal.enable_output():
         run_cmd_local = app.function(
-            image=image, name=job.function_name, volumes=volumes, secrets=secrets
+            image=image,
+            name=job.function_name,
+            volumes=volumes,
+            secrets=secrets,
+            gpu=job.gpu,
         )(run_cmd)
         with app.run():
             run_cmd_local.remote(job.command)
@@ -254,11 +263,17 @@ def uv():
     help="Add the Modal secret named NAME to the container's environment, or set "
     "the environment variable KEY to VALUE as a secret. May be provided multiple times.",
 )
+@click.option(
+    "--gpu",
+    metavar="GPU",
+    help="Run on a GPU, e.g. `T4`, `A100-80GB`, or `H100:8` for multiple GPUs.",
+)
 def run(
     command: tuple[str, ...],
     with_: tuple[str, ...],
     volumes: tuple[tuple[str | Path, str], ...],
     secrets: tuple[str | tuple[str, str], ...],
+    gpu: str | None,
 ):
     """Run COMMAND on Modal with `uv run`.
 
@@ -274,7 +289,7 @@ def run(
     else:
         name = shlex.join(command)
     try:
-        job = build_job(command, with_, volumes, secrets)
+        job = build_job(command, with_, volumes, secrets, gpu)
     except (ValueError, tomllib.TOMLDecodeError) as e:
         raise click.ClickException(f"Invalid script metadata in {name}: {e}") from e
     try:

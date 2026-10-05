@@ -336,3 +336,23 @@ def test_run_secret_invalid(tmp_path, monkeypatch):
 
     assert result.exit_code == 2
     assert "Invalid value for '-s' / '--secret' / '--secrets'" in result.output
+
+
+def test_build_job_with_gpu(tmp_path):
+    script = tmp_path / "job.py"
+    script.write_text("print('hi')")
+    assert build_job([str(script)]).gpu is None
+    assert build_job([str(script)], gpu="T4").gpu == "T4"
+
+
+def test_run_gpu(tmp_path, monkeypatch):
+    script = tmp_path / "job.py"
+    script.write_text("print('hi')")
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(main, ["uv", "run", "--gpu", "H100:8", str(script)])
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0].gpu == "H100:8"
