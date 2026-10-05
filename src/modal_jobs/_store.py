@@ -90,6 +90,10 @@ class JobStore:
     def running(self) -> list[dict]:
         return self.list(status=RUNNING)
 
+    def delete(self, job_id: str) -> None:
+        """Delete the record with ID `job_id`, if any."""
+        self._path(job_id).unlink(missing_ok=True)
+
 
 def classify_outcome(call) -> dict:
     """Return the terminal fields for the job of the `modal.FunctionCall` `call`.

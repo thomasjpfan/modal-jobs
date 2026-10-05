@@ -26,6 +26,15 @@ def test_put_overwrites(tmp_path):
     assert [p.name for p in tmp_path.iterdir()] == ["ap-abc.json"]
 
 
+def test_delete(tmp_path):
+    store = JobStore(tmp_path)
+    store.put(make_record("ap-abc", 1.0))
+    store.put(make_record("ap-def", 2.0))
+    store.delete("ap-abc")
+    store.delete("ap-missing")
+    assert [record["id"] for record in store.list()] == ["ap-def"]
+
+
 def test_list_newest_first(tmp_path):
     store = JobStore(tmp_path)
     for i, job_id in enumerate(["ap-1", "ap-3", "ap-2"]):

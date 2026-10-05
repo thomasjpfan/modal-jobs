@@ -5,11 +5,12 @@ current. Running jobs are reconciled with their Modal function calls whenever th
 are read, and periodically by a cron function.
 """
 
+import time
 from pathlib import Path
 
 import modal
 
-from modal_jobs._store import RUNNING, JobStore, classify_outcome
+from modal_jobs._store import RUNNING, STOPPED, JobStore, classify_outcome
 
 APP_NAME = "modal-jobs"
 VOLUME_NAME = "modal-jobs-db"
@@ -68,6 +69,38 @@ class Registry:
         return self._reconcile([self.store.get(id_or_prefix)])[0]
 
     @modal.method()
+    def stop_job(self, id_or_prefix: str, stopped_by: str) -> dict:
+        """Stop the job `id_or_prefix` if it is running, and return its record."""
+        record = self._reconcile([self.store.get(id_or_prefix)])[0]
+        if record["status"] != RUNNING:
+            return record
+        modal.FunctionCall.from_id(record["call_id"]).cancel(terminate_containers=True)
+        record = {
+            **record,
+            "status": STOPPED,
+            "finished_at": time.time(),
+            "error": f"Stopped by {stopped_by}",
+        }
+        self.store.put(record)
+        volume.commit()
+        return record
+
+    @modal.method()
+    def delete_jobs(self, ids: list[str]) -> list[str]:
+        """Delete the records of the finished jobs `ids`, and return the deleted IDs.
+
+        Raises `ValueError` without deleting anything if any of the jobs is running.
+        """
+        records = self._reconcile([self.store.get(job_id) for job_id in ids])
+        running = [record["id"] for record in records if record["status"] == RUNNING]
+        if running:
+            raise ValueError(f"Jobs still running: {', '.join(running)}")
+        for record in records:
+            self.store.delete(record["id"])
+        volume.commit()
+        return [record["id"] for record in records]
+
+    @modal.method()
     def reconcile(self) -> int:
         """Reconcile all running jobs, and return how many are still running."""
         records = self._reconcile(self.store.running())
@@ -96,3 +129,20 @@ def read_log(job_id: str) -> bytes:
     """
     volume = modal.Volume.from_name(LOGS_VOLUME_NAME, create_if_missing=True)
     return b"".join(volume.read_file(f"{job_id}.log"))
+
+
+def delete_logs(job_ids: list[str]) -> None:
+    """Delete the saved output of the jobs `job_ids`, skipping jobs without any."""
+    volume = modal.Volume.from_name(LOGS_VOLUME_NAME, create_if_missing=True)
+    for job_id in job_ids:
+        try:
+            volume.remove_file(f"{job_id}.log")
+        except FileNotFoundError:
+            pass
+
+
+def logs_usage() -> tuple[int, int]:
+    """Return the number of saved log files and their total size in bytes."""
+    volume = modal.Volume.from_name(LOGS_VOLUME_NAME, create_if_missing=True)
+    entries = [entry for entry in volume.listdir("/") if entry.path.endswith(".log")]
+    return len(entries), sum(entry.size for entry in entries)

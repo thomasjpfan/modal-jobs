@@ -799,8 +799,9 @@ def test_run_detach(monkeypatch, flag, command, args):
     assert len(jobs) == 1
     assert jobs[0].detach
     assert "Started echo hi in the background" in result.output
-    assert "modal app logs ap-123" in result.output
-    assert "modal app stop ap-123" in result.output
+    assert "modal-jobs logs --follow ap-123" in result.output
+    assert "modal-jobs wait ap-123" in result.output
+    assert "modal-jobs stop ap-123" in result.output
     assert "Finished" not in result.output
 
 
@@ -1039,6 +1040,25 @@ class FakeRegistry:
             lambda limit, status, name=None: store.list(limit, status, name)
         )
         self.get_job = FakeMethod(store.get)
+        self.stop_job = FakeMethod(lambda job_id, stopped_by: fake_stop_job(store, job_id))
+        self.delete_jobs = FakeMethod(lambda ids: fake_delete_jobs(store, ids))
+
+
+def fake_stop_job(store, job_id):
+    record = store.get(job_id)
+    if record["status"] == "running":
+        record = {**record, "status": "stopped", "finished_at": time.time()}
+        store.put(record)
+    return record
+
+
+def fake_delete_jobs(store, ids):
+    records = [store.get(job_id) for job_id in ids]
+    if any(record["status"] == "running" for record in records):
+        raise ValueError("Jobs still running")
+    for record in records:
+        store.delete(record["id"])
+    return [record["id"] for record in records]
 
 
 def make_record(job_id, status="running", **fields):
@@ -1262,7 +1282,7 @@ def test_logs_not_saved_yet(store, saved_logs):
 
     assert result.exit_code == 1
     assert "No output was saved" in result.output
-    assert "modal app logs ap-abc" in result.output
+    assert "modal-jobs logs --follow ap-abc" in result.output
 
 
 def test_logs_before_saved_logs(store, saved_logs):
@@ -1288,3 +1308,331 @@ def test_show_saved_logs_hint(store):
 
     assert result.exit_code == 0, result.output
     assert "modal-jobs logs ap-abc" in result.output
+
+
+def test_show_running_hints(store):
+    store.put(make_record("ap-abc", log="ap-abc.log"))
+
+    result = CliRunner().invoke(main, ["show", "ap-abc"])
+
+    assert result.exit_code == 0, result.output
+    assert "modal-jobs logs --follow ap-abc" in result.output
+    assert "modal-jobs logs ap-abc" in result.output
+    assert "modal-jobs stop ap-abc" in result.output
+
+
+def test_show_json(store):
+    record = make_record("ap-abc", status="succeeded", exit_code=0)
+    store.put(record)
+
+    result = CliRunner().invoke(main, ["show", "ap-a", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == record
+
+
+def test_ls_json(store):
+    store.put(make_record("ap-old", submitted_at=time.time() - 200))
+    store.put(make_record("ap-new"))
+
+    result = CliRunner().invoke(main, ["ls", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert [record["id"] for record in json.loads(result.output)] == ["ap-new", "ap-old"]
+
+
+def test_ls_json_empty(store):
+    result = CliRunner().invoke(main, ["ls", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == []
+
+
+def test_logs_tail(store, saved_logs):
+    store.put(make_record("ap-abc", status="succeeded", log="ap-abc.log"))
+    saved_logs["ap-abc"] = b"one\ntwo\nthree\n"
+
+    result = CliRunner().invoke(main, ["logs", "--tail", "2", "ap-abc"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output == "two\nthree\n"
+
+
+def test_logs_follow_running(store, saved_logs, monkeypatch):
+    streamed = []
+    monkeypatch.setattr(_cli, "stream_logs", streamed.append)
+    store.put(make_record("ap-abc", log="ap-abc.log"))
+
+    result = CliRunner().invoke(main, ["logs", "-f", "ap-a"])
+
+    assert result.exit_code == 0, result.output
+    assert streamed == ["ap-abc"]
+
+
+def test_logs_follow_finished(store, saved_logs, monkeypatch):
+    streamed = []
+    monkeypatch.setattr(_cli, "stream_logs", streamed.append)
+    store.put(make_record("ap-abc", status="succeeded", log="ap-abc.log"))
+    saved_logs["ap-abc"] = b"done\n"
+
+    result = CliRunner().invoke(main, ["logs", "--follow", "ap-abc"])
+
+    assert result.exit_code == 0, result.output
+    assert streamed == []
+    assert result.output == "done\n"
+
+
+def test_logs_follow_and_tail(store, saved_logs):
+    result = CliRunner().invoke(main, ["logs", "-f", "-n", "2", "ap-abc"])
+
+    assert result.exit_code == 2
+    assert "can't be used together" in result.output
+
+
+@pytest.fixture
+def stopped_apps(monkeypatch):
+    apps = []
+    monkeypatch.setattr(_cli, "stop_app", apps.append)
+    return apps
+
+
+def test_stop(store, stopped_apps):
+    store.put(make_record("ap-abc"))
+
+    result = CliRunner().invoke(main, ["stop", "ap-a"], input="y\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Stop ap-abc?" in result.output
+    assert "Stopped ap-abc" in result.output
+    assert store.get("ap-abc")["status"] == "stopped"
+    assert stopped_apps == ["ap-abc"]
+
+
+def test_stop_aborted(store, stopped_apps):
+    store.put(make_record("ap-abc"))
+
+    result = CliRunner().invoke(main, ["stop", "ap-abc"], input="n\n")
+
+    assert result.exit_code == 1
+    assert store.get("ap-abc")["status"] == "running"
+    assert stopped_apps == []
+
+
+def test_stop_already_finished(store, stopped_apps):
+    store.put(make_record("ap-abc", status="succeeded"))
+    store.put(make_record("ap-def"))
+
+    result = CliRunner().invoke(main, ["stop", "--yes", "ap-abc", "ap-def"])
+
+    assert result.exit_code == 0, result.output
+    assert "ap-abc already succeeded" in result.output
+    assert "Stopped ap-def" in result.output
+    assert store.get("ap-abc")["status"] == "succeeded"
+    assert stopped_apps == ["ap-def"]
+
+
+def test_stop_old_backend(store, stopped_apps, monkeypatch):
+    from modal_jobs import _backend
+
+    registry = _backend.registry()
+    del registry.stop_job
+    monkeypatch.setattr(_backend, "registry", lambda: registry)
+    store.put(make_record("ap-abc"))
+
+    result = CliRunner().invoke(main, ["stop", "-y", "ap-abc"])
+
+    assert result.exit_code == 1
+    assert "modal-jobs backend deploy" in result.output
+    assert stopped_apps == []
+
+
+@pytest.mark.parametrize(
+    "fields, exit_code",
+    [
+        ({"status": "succeeded", "exit_code": 0}, 0),
+        ({"status": "failed", "exit_code": 3}, 3),
+        ({"status": "failed", "exit_code": -9}, 1),
+        ({"status": "failed", "error": "boom"}, 1),
+        ({"status": "timed_out"}, 1),
+        ({"status": "stopped"}, 1),
+        ({"status": "unknown"}, 1),
+    ],
+)
+def test_wait_finished(store, fields, exit_code):
+    store.put(make_record("ap-abc", **fields))
+
+    result = CliRunner().invoke(main, ["wait", "ap-a"])
+
+    assert result.exit_code == exit_code, result.output
+    assert f"Job ap-abc {fields['status']}" in result.output
+
+
+def test_wait_polls_until_finished(store, monkeypatch):
+    store.put(make_record("ap-abc"))
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            store.put(make_record("ap-abc", status="succeeded", exit_code=0))
+
+    monkeypatch.setattr(_cli.time, "sleep", sleep)
+
+    result = CliRunner().invoke(main, ["wait", "--interval", "2", "ap-abc"])
+
+    assert result.exit_code == 0, result.output
+    assert sleeps == [2, 2]
+    assert "Job ap-abc succeeded" in result.output
+
+
+def test_wait_timeout(store, monkeypatch):
+    store.put(make_record("ap-abc"))
+    now = [0.0]
+
+    def sleep(seconds):
+        now[0] += seconds
+
+    monkeypatch.setattr(_cli.time, "sleep", sleep)
+    monkeypatch.setattr(_cli.time, "monotonic", lambda: now[0])
+
+    result = CliRunner().invoke(main, ["wait", "--timeout", "12", "ap-abc"])
+
+    assert result.exit_code == 124
+    assert "Timed out waiting for ap-abc" in result.output
+    assert now[0] == 12
+
+
+@pytest.fixture
+def deleted_logs(monkeypatch):
+    from modal_jobs import _backend
+
+    deleted = []
+    monkeypatch.setattr(_backend, "delete_logs", deleted.extend)
+    return deleted
+
+
+def test_rm(store, deleted_logs):
+    store.put(make_record("ap-abc", status="succeeded"))
+    store.put(make_record("ap-def", status="failed"))
+    store.put(make_record("ap-xyz", status="failed"))
+
+    result = CliRunner().invoke(main, ["rm", "ap-a", "ap-def", "ap-abc"], input="y\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Delete ap-abc, ap-def?" in result.output
+    assert "Deleted 2 jobs" in result.output
+    assert [record["id"] for record in store.list()] == ["ap-xyz"]
+    assert deleted_logs == ["ap-abc", "ap-def"]
+
+
+def test_rm_running(store, deleted_logs):
+    store.put(make_record("ap-abc"))
+
+    result = CliRunner().invoke(main, ["rm", "-y", "ap-abc"])
+
+    assert result.exit_code == 1
+    assert "modal-jobs stop" in result.output
+    assert store.get("ap-abc")["status"] == "running"
+    assert deleted_logs == []
+
+
+def test_prune(store, deleted_logs):
+    day = 86400
+    now = time.time()
+    store.put(make_record("ap-old", status="succeeded", submitted_at=now - 8 * day))
+    store.put(make_record("ap-old-failed", status="failed", submitted_at=now - 9 * day))
+    store.put(make_record("ap-old-running", submitted_at=now - 8 * day))
+    store.put(make_record("ap-new", status="succeeded", submitted_at=now - day))
+
+    result = CliRunner().invoke(main, ["prune", "-y"])
+
+    assert result.exit_code == 0, result.output
+    assert "Deleted 2 jobs" in result.output
+    remaining = {record["id"] for record in store.list()}
+    assert remaining == {"ap-old-running", "ap-new"}
+    assert sorted(deleted_logs) == ["ap-old", "ap-old-failed"]
+
+
+def test_prune_status_and_older_than(store, deleted_logs):
+    now = time.time()
+    store.put(make_record("ap-a", status="succeeded", submitted_at=now - 7200))
+    store.put(make_record("ap-b", status="failed", submitted_at=now - 7200))
+    store.put(make_record("ap-c", status="failed", submitted_at=now - 60))
+
+    result = CliRunner().invoke(
+        main, ["prune", "--older-than", "1h", "--status", "failed"], input="y\n"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Delete 1 job?" in result.output
+    assert deleted_logs == ["ap-b"]
+
+
+def test_prune_dry_run(store, deleted_logs):
+    store.put(make_record("ap-old", status="succeeded", submitted_at=time.time() - 30 * 86400))
+
+    result = CliRunner().invoke(main, ["prune", "--older-than", "30d", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "ap-old" in result.output
+    assert store.get("ap-old")["status"] == "succeeded"
+    assert deleted_logs == []
+
+
+def test_prune_nothing(store, deleted_logs):
+    result = CliRunner().invoke(main, ["prune"])
+
+    assert result.exit_code == 0, result.output
+    assert "No jobs to delete" in result.output
+
+
+def test_prune_rejects_running_status(store):
+    result = CliRunner().invoke(main, ["prune", "--status", "running"])
+
+    assert result.exit_code == 2
+
+
+def test_parse_duration_unbounded():
+    assert parse_duration("30d", bounded=False) == 30 * 86400
+    with pytest.raises(ValueError, match="at least 1 second"):
+        parse_duration("0", bounded=False)
+
+
+def test_backend_status(store, monkeypatch):
+    from modal_jobs import _backend
+
+    monkeypatch.setattr(_backend, "logs_usage", lambda: (3, 3 * 1024 * 1024))
+    store.put(make_record("ap-a"))
+    store.put(make_record("ap-b", status="succeeded"))
+    store.put(make_record("ap-c", status="succeeded"))
+
+    result = CliRunner().invoke(main, ["backend", "status"])
+
+    assert result.exit_code == 0, result.output
+    assert "Backend: deployed" in result.output
+    assert "Jobs: 3 (1 running, 2 succeeded)" in result.output
+    assert "Saved logs: 3 files, 3M" in result.output
+
+
+@pytest.mark.parametrize(
+    "size, expected",
+    [(0, "0B"), (1023, "1023B"), (2048, "2K"), (5 * 1024 * 1024, "5M"), (3 * 1024**3, "3.0G")],
+)
+def test_format_bytes(size, expected):
+    assert _cli.format_bytes(size) == expected
+
+
+def test_backend_status_not_deployed(monkeypatch):
+    import modal.exception
+
+    from modal_jobs import _backend
+
+    def missing_registry():
+        raise modal.exception.NotFoundError("missing")
+
+    monkeypatch.setattr(_backend, "registry", missing_registry)
+
+    result = CliRunner().invoke(main, ["backend", "status"])
+
+    assert result.exit_code == 1
+    assert "modal-jobs backend deploy" in result.output

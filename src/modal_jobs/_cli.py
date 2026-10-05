@@ -1,15 +1,18 @@
 import getpass
+import json
 import re
 import shlex
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -151,10 +154,11 @@ DURATION_UNITS = {"d": 86400, "h": 3600, "m": 60, "s": 1}
 MAX_TIMEOUT = 86400
 
 
-def parse_duration(value: str) -> int:
+def parse_duration(value: str, bounded: bool = True) -> int:
     """Parse a duration like `90`, `30s`, `10m`, `2h`, or `1h30m` into seconds.
 
     A plain number is in seconds. Units must be in `d`, `h`, `m`, `s` order.
+    If `bounded`, the duration must be at most Modal's maximum timeout of 24 hours.
     """
     if value.isdigit():
         seconds = int(value)
@@ -163,8 +167,10 @@ def parse_duration(value: str) -> int:
         if not value or match is None:
             raise ValueError(f"Expected a duration like `90`, `10m`, or `1h30m`, got {value!r}")
         seconds = sum(int(n) * DURATION_UNITS[unit] for unit, n in match.groupdict().items() if n)
-    if not 1 <= seconds <= MAX_TIMEOUT:
+    if bounded and not 1 <= seconds <= MAX_TIMEOUT:
         raise ValueError(f"Duration must be between 1 second and 24 hours, got {value!r}")
+    if seconds < 1:
+        raise ValueError(f"Duration must be at least 1 second, got {value!r}")
     return seconds
 
 
@@ -609,9 +615,9 @@ def run_and_report(job: JobSpec, name: str):
     elif job.detach:
         console.print(
             f"Started {name} in the background.\n\n"
-            f"Stream logs:\n  [green]modal app logs {app_id}[/green]\n\n"
-            f"Show saved logs:\n  [green]modal-jobs logs {app_id}[/green]\n\n"
-            f"Stop the job:\n  [green]modal app stop {app_id}[/green]"
+            f"Stream logs:\n  [green]modal-jobs logs --follow {app_id}[/green]\n\n"
+            f"Wait for it:\n  [green]modal-jobs wait {app_id}[/green]\n\n"
+            f"Stop the job:\n  [green]modal-jobs stop {app_id}[/green]"
         )
     # Otherwise the client was interrupted, and Modal already printed how to track the job.
 
@@ -848,6 +854,15 @@ def format_memory(mebibytes: float) -> str:
     return f"{mebibytes / 1024:.1f}G"
 
 
+def format_bytes(size: int) -> str:
+    """Format a size in bytes like `512B`, `3K`, `512M`, or `3.9G`."""
+    if size < 1024:
+        return f"{size}B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.0f}K"
+    return format_memory(size / (1024 * 1024))
+
+
 def format_exit_code(record: dict) -> str:
     """Format the exit code of `record`, naming the signal that killed the job, if any."""
     code = record["exit_code"]
@@ -950,6 +965,9 @@ def get_registry():
         ) from e
 
 
+json_option = click.option("--json", "as_json", is_flag=True, help="Print the job records as JSON.")
+
+
 @main.command("ls")
 @click.option(
     "-n",
@@ -965,11 +983,15 @@ def get_registry():
     help="Only show jobs with this status.",
 )
 @click.option("--name", metavar="NAME", help="Only show jobs with this name.")
-def ls(limit: int, status: str | None, name: str | None):
+@json_option
+def ls(limit: int, status: str | None, name: str | None, as_json: bool):
     """List recent jobs."""
     # Only pass `name` when set, so `ls` works with backends deployed before it existed.
     filters = {"name": name} if name is not None else {}
     records = get_registry().list_jobs.remote(limit, status, **filters)
+    if as_json:
+        click.echo(json.dumps(records, indent=2))
+        return
     if not records:
         console.print("No jobs found.")
         return
@@ -1010,32 +1032,77 @@ def get_record(job_id: str) -> dict:
         raise click.ClickException(str(e)) from e
 
 
+def registry_method(name: str):
+    """Return the method `name` of the deployed `Registry`, or fail with a hint to update it."""
+    try:
+        return getattr(get_registry(), name)
+    # Backends deployed before the method existed don't have it.
+    except AttributeError as e:
+        raise click.ClickException(
+            "The modal-jobs backend is out of date. Update it with `modal-jobs backend deploy`."
+        ) from e
+
+
 @main.command("show")
 @click.argument("job_id")
-def show(job_id: str):
+@json_option
+def show(job_id: str, as_json: bool):
     """Show the details of the job JOB_ID, which may be a unique prefix."""
     record = get_record(job_id)
+    if as_json:
+        click.echo(json.dumps(record, indent=2))
+        return
     console.print(format_record(record), highlight=False)
-    console.print(
-        f"\nStream logs:\n  [green]modal app logs {record['id']}[/green]", highlight=False
-    )
+    running = record["status"] == "running"
+    if running:
+        console.print(
+            f"\nStream logs:\n  [green]modal-jobs logs --follow {record['id']}[/green]",
+            highlight=False,
+        )
     if record.get("log"):
         console.print(
             f"\nShow saved logs:\n  [green]modal-jobs logs {record['id']}[/green]", highlight=False
         )
-    if record["status"] == "running":
-        console.print(f"\nStop the job:\n  [green]modal app stop {record['id']}[/green]")
+    elif not running:
+        console.print(
+            f"\nShow logs:\n  [green]modal app logs {record['id']}[/green]", highlight=False
+        )
+    if running:
+        console.print(f"\nStop the job:\n  [green]modal-jobs stop {record['id']}[/green]")
+
+
+def stream_logs(app_id: str) -> None:
+    """Stream the logs of the app `app_id` until it stops."""
+    subprocess.run([sys.executable, "-m", "modal", "app", "logs", "--follow", app_id], check=False)
 
 
 @main.command("logs")
 @click.argument("job_id")
-def logs(job_id: str):
+@click.option(
+    "-f",
+    "--follow",
+    is_flag=True,
+    help="Stream the output of a running job until it finishes.",
+)
+@click.option(
+    "-n",
+    "--tail",
+    type=click.IntRange(min=1),
+    metavar="N",
+    help="Only print the last N lines of the saved output.",
+)
+def logs(job_id: str, follow: bool, tail: int | None):
     """Print the saved output of the job JOB_ID, which may be a unique prefix."""
     import modal.exception
 
     from modal_jobs import _backend
 
+    if follow and tail is not None:
+        raise click.UsageError("--follow and --tail can't be used together.")
     record = get_record(job_id)
+    if follow and record["status"] == "running":
+        stream_logs(record["id"])
+        return
     if not record.get("log"):
         raise click.ClickException(
             f"Job {record['id']} was run before logs were saved. "
@@ -1045,9 +1112,184 @@ def logs(job_id: str):
         output = _backend.read_log(record["id"])
     except (FileNotFoundError, modal.exception.NotFoundError) as e:
         raise click.ClickException(
-            f"No output was saved for job {record['id']} yet. Try `modal app logs {record['id']}`."
+            f"No output was saved for job {record['id']} yet. "
+            f"Try `modal-jobs logs --follow {record['id']}`."
         ) from e
+    if tail is not None:
+        output = b"".join(output.splitlines(keepends=True)[-tail:])
     click.echo(output, nl=False)
+
+
+yes_option = click.option("-y", "--yes", is_flag=True, help="Don't ask for confirmation.")
+
+
+def stop_app(app_id: str) -> None:
+    """Stop the Modal app `app_id`, ignoring failures, e.g. when it already stopped."""
+    subprocess.run(
+        [sys.executable, "-m", "modal", "app", "stop", "--yes", app_id],
+        capture_output=True,
+        check=False,
+    )
+
+
+@main.command("stop")
+@click.argument("job_ids", nargs=-1, required=True, metavar="JOB_ID...")
+@yes_option
+def stop(job_ids: tuple[str, ...], yes: bool):
+    """Stop the running jobs JOB_ID..., which may be unique prefixes."""
+    stop_job = registry_method("stop_job")
+    records = [get_record(job_id) for job_id in job_ids]
+    running = [record for record in records if record["status"] == "running"]
+    for record in records:
+        if record["status"] != "running":
+            console.print(f"{record['id']} already {format_status(record['status'])}")
+    if not running:
+        return
+    if not yes:
+        ids = ", ".join(record["id"] for record in running)
+        click.confirm(f"Stop {ids}?", abort=True)
+    stopped_by = f"{getpass.getuser()}@{socket.gethostname()}"
+    for record in running:
+        record = stop_job.remote(record["id"], stopped_by)
+        stop_app(record["id"])
+        if record["status"] == "stopped":
+            console.print(f"[bold green]✓[/bold green] Stopped {record['id']}")
+        else:
+            # The job finished before it could be stopped.
+            console.print(f"{record['id']} already {format_status(record['status'])}")
+
+
+def job_exit_code(record: dict) -> int:
+    """Return the exit code for `modal-jobs wait` to exit with for the finished job `record`."""
+    if record["status"] == "succeeded":
+        return 0
+    if record["status"] == "failed" and (record.get("exit_code") or 0) > 0:
+        return record["exit_code"]
+    return 1
+
+
+# Like `timeout(1)`, exit with 124 when the wait times out.
+WAIT_TIMEOUT_EXIT_CODE = 124
+
+
+@main.command("wait")
+@click.argument("job_id")
+@click.option(
+    "--timeout",
+    metavar="DURATION",
+    callback=parse_timeout,
+    help="Give up after DURATION, e.g. `90` (seconds), `10m`, or `2h`, and exit with "
+    f"{WAIT_TIMEOUT_EXIT_CODE}. Defaults to waiting until the job finishes.",
+)
+@click.option(
+    "--interval",
+    type=click.FloatRange(min=0, min_open=True),
+    default=5,
+    show_default=True,
+    metavar="SECONDS",
+    help="Check the job's status every SECONDS.",
+)
+def wait(job_id: str, timeout: int | None, interval: float):
+    """Wait for the job JOB_ID to finish, and exit with its exit code.
+
+    Exits with 0 if the job succeeded, the job's exit code if it failed, and 1 if it
+    timed out or was stopped.
+    """
+    deadline = None if timeout is None else time.monotonic() + timeout
+    record = get_record(job_id)
+    while record["status"] == "running":
+        if deadline is not None and time.monotonic() >= deadline:
+            console.print(f"Timed out waiting for {record['id']}", highlight=False)
+            sys.exit(WAIT_TIMEOUT_EXIT_CODE)
+        time.sleep(interval if deadline is None else min(interval, deadline - time.monotonic()))
+        record = get_record(record["id"])
+    lines = [f"Job {record['id']} {format_status(record['status'])}"]
+    if record.get("exit_code") is not None:
+        lines.append(f"Exit code: {format_exit_code(record)}")
+    if record.get("error"):
+        lines.append(f"Error: {record['error']}")
+    console.print("\n".join(lines), highlight=False)
+    sys.exit(job_exit_code(record))
+
+
+def delete_jobs(records: list[dict]) -> None:
+    """Delete the records and saved output of the finished jobs `records`."""
+    from modal_jobs import _backend
+
+    ids = [record["id"] for record in records]
+    try:
+        registry_method("delete_jobs").remote(ids)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    _backend.delete_logs(ids)
+    noun = "job" if len(ids) == 1 else "jobs"
+    console.print(f"[bold green]✓[/bold green] Deleted {len(ids)} {noun}")
+
+
+@main.command("rm")
+@click.argument("job_ids", nargs=-1, required=True, metavar="JOB_ID...")
+@yes_option
+def rm(job_ids: tuple[str, ...], yes: bool):
+    """Delete the finished jobs JOB_ID... and their saved output.
+
+    JOB_ID may be a unique prefix.
+    """
+    records = [get_record(job_id) for job_id in job_ids]
+    running = [record["id"] for record in records if record["status"] == "running"]
+    if running:
+        raise click.ClickException(
+            f"Can't delete running jobs: {', '.join(running)}. "
+            "Stop them first with `modal-jobs stop`."
+        )
+    # Prefixes may resolve to the same job.
+    records = list({record["id"]: record for record in records}.values())
+    if not yes:
+        click.confirm(f"Delete {', '.join(record['id'] for record in records)}?", abort=True)
+    delete_jobs(records)
+
+
+def parse_age(ctx, param, value: str) -> int:
+    try:
+        return parse_duration(value, bounded=False)
+    except ValueError as e:
+        raise click.BadParameter(str(e)) from e
+
+
+@main.command("prune")
+@click.option(
+    "--older-than",
+    metavar="DURATION",
+    default="7d",
+    show_default=True,
+    callback=parse_age,
+    help="Only delete jobs submitted more than DURATION ago, e.g. `12h` or `30d`.",
+)
+@click.option(
+    "--status",
+    type=click.Choice([status for status in STATUS_STYLES if status != "running"]),
+    help="Only delete jobs with this status.",
+)
+@click.option("--dry-run", is_flag=True, help="Print the jobs to delete without deleting them.")
+@yes_option
+def prune(older_than: int, status: str | None, dry_run: bool, yes: bool):
+    """Delete finished jobs and their saved output."""
+    cutoff = time.time() - older_than
+    records = [
+        record
+        for record in get_registry().list_jobs.remote(None, status)
+        if record["status"] != "running" and record["submitted_at"] < cutoff
+    ]
+    if not records:
+        console.print("No jobs to delete.")
+        return
+    if dry_run:
+        for record in records:
+            click.echo(f"{record['id']}  {record['name']}  {record['status']}")
+        return
+    if not yes:
+        noun = "job" if len(records) == 1 else "jobs"
+        click.confirm(f"Delete {len(records)} {noun}?", abort=True)
+    delete_jobs(records)
 
 
 @main.group()
@@ -1065,3 +1307,22 @@ def backend_deploy():
     with modal.enable_output():
         _backend.app.deploy()
     console.print(f"[bold green]✓[/bold green] Deployed the {_backend.APP_NAME} backend")
+
+
+@backend.command("status")
+def backend_status():
+    """Show whether the backend is deployed, and how many jobs and logs it holds."""
+    from modal_jobs import _backend
+
+    records = get_registry().list_jobs.remote(None, None)
+    counts = Counter(record["status"] for record in records)
+    by_status = ", ".join(
+        f"{counts[status]} {format_status(status)}" for status in STATUS_STYLES if counts[status]
+    )
+    log_count, log_bytes = _backend.logs_usage()
+    lines = [
+        f"Backend: [green]deployed[/green] ({_backend.APP_NAME})",
+        f"Jobs: {len(records)}" + (f" ({by_status})" if by_status else ""),
+        f"Saved logs: {log_count} files, {format_bytes(log_bytes)}",
+    ]
+    console.print("\n".join(lines), highlight=False)

@@ -201,7 +201,7 @@ def test_cli_uv_run_detach(tmp_path):
     result = CliRunner().invoke(main, ["uv", "run", "--detach", str(script)])
     assert result.exit_code == 0, result.output
     assert "Started hello.py in the background" in result.output
-    match = re.search(r"modal app stop (ap-\w+)", result.output)
+    match = re.search(r"modal-jobs stop (ap-\w+)", result.output)
     assert match is not None, result.output
     subprocess.run(["modal", "app", "stop", match.group(1)], check=False)
 
@@ -282,3 +282,40 @@ def test_tracking_saves_logs(tracking_backend):
     assert result.exit_code == 0, result.output
     assert "to stdout" in result.output
     assert "to stderr" in result.output
+
+
+def test_cli_stop(tracking_backend):
+    app_id = run_tracked(["--detach", "sleep", "600"])
+    assert tracking_backend.get_job.remote(app_id)["status"] == "running"
+    result = CliRunner().invoke(main, ["stop", "--yes", app_id])
+    assert result.exit_code == 0, result.output
+    assert f"Stopped {app_id}" in result.output
+    record = tracking_backend.get_job.remote(app_id)
+    assert record["status"] == "stopped"
+    assert record["error"].startswith("Stopped by ")
+
+
+def test_cli_wait_and_rm(tracking_backend):
+    app_id = run_tracked(["--detach", "python", "-c", "print('waited')"])
+    result = CliRunner().invoke(main, ["wait", "--interval", "2", app_id])
+    assert result.exit_code == 0, result.output
+    assert f"Job {app_id} succeeded" in result.output
+    result = CliRunner().invoke(main, ["logs", app_id])
+    assert "waited" in result.output, result.output
+    result = CliRunner().invoke(main, ["rm", "--yes", app_id])
+    assert result.exit_code == 0, result.output
+    result = CliRunner().invoke(main, ["show", app_id])
+    assert "No job found" in result.output, result.output
+
+
+def test_cli_wait_failed(tracking_backend):
+    app_id = run_tracked(["--detach", "python", "-c", "import sys; sys.exit(4)"])
+    result = CliRunner().invoke(main, ["wait", "--interval", "2", app_id])
+    assert result.exit_code == 4, result.output
+
+
+def test_cli_backend_status(tracking_backend):
+    result = CliRunner().invoke(main, ["backend", "status"])
+    assert result.exit_code == 0, result.output
+    assert "Backend: deployed" in result.output
+    assert "Saved logs:" in result.output
