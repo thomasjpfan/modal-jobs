@@ -35,6 +35,28 @@ def test_delete(tmp_path):
     assert [record["id"] for record in store.list()] == ["ap-def"]
 
 
+def test_script_round_trip(tmp_path):
+    store = JobStore(tmp_path)
+    store.put(make_record("ap-abc", 1.0))
+    store.put_script("ap-abc", "print('hi')\n")
+
+    assert store.get_script("ap-abc") == "print('hi')\n"
+    # Scripts are not records.
+    assert [record["id"] for record in store.list()] == ["ap-abc"]
+    with pytest.raises(FileNotFoundError):
+        store.get_script("ap-def")
+
+
+def test_delete_removes_script(tmp_path):
+    store = JobStore(tmp_path)
+    store.put(make_record("ap-abc", 1.0))
+    store.put_script("ap-abc", "print('hi')\n")
+
+    store.delete("ap-abc")
+
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_list_newest_first(tmp_path):
     store = JobStore(tmp_path)
     for i, job_id in enumerate(["ap-1", "ap-3", "ap-2"]):

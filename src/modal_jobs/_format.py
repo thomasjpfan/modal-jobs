@@ -103,6 +103,8 @@ def record_fields(record: dict) -> list[tuple[str, str]]:
         fields.append(("Error", record["error"]))
     fields += usage_fields(record)
     fields.append(("Command", shlex.join(record["command"])))
+    if record.get("script"):
+        fields.append(("Script", record["script"]))
     if record.get("image"):
         fields.append(("Image", record["image"]))
     if record.get("add_python"):

@@ -24,7 +24,11 @@ STATUSES = (RUNNING, SUCCEEDED, FAILED, TIMED_OUT, STOPPED, UNKNOWN)
 
 
 class JobStore:
-    """Job records in `root`, one `<id>.json` file per job."""
+    """Job records in `root`, one `<id>.json` file per job.
+
+    The source of the script a job ran, if any, is saved next to its record as `<id>.py`,
+    so listing records doesn't read it.
+    """
 
     def __init__(self, root: Path):
         self.root = Path(root)
@@ -34,18 +38,35 @@ class JobStore:
             raise ValueError(f"Invalid job ID {job_id!r}")
         return self.root / f"{job_id}.json"
 
-    def put(self, record: dict) -> None:
-        """Write `record`, replacing any existing record with the same ID atomically."""
-        path = self._path(record["id"])
+    def _script_path(self, job_id: str) -> Path:
+        return self._path(job_id).with_suffix(".py")
+
+    def _write(self, path: Path, text: str) -> None:
+        """Write `text` to `path` atomically."""
         self.root.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=self.root, prefix=".", suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as f:
-                json.dump(record, f, indent=2)
+                f.write(text)
             os.replace(tmp, path)
         except BaseException:
             Path(tmp).unlink(missing_ok=True)
             raise
+
+    def put(self, record: dict) -> None:
+        """Write `record`, replacing any existing record with the same ID atomically."""
+        self._write(self._path(record["id"]), json.dumps(record, indent=2))
+
+    def put_script(self, job_id: str, source: str) -> None:
+        """Save `source` as the script of the job `job_id`."""
+        self._write(self._script_path(job_id), source)
+
+    def get_script(self, job_id: str) -> str:
+        """Return the script of the job `job_id`.
+
+        Raises `FileNotFoundError` if the job has no saved script.
+        """
+        return self._script_path(job_id).read_text()
 
     def _ids(self) -> list[str]:
         if not self.root.is_dir():
@@ -101,8 +122,9 @@ class JobStore:
         return self.list(status=RUNNING)
 
     def delete(self, job_id: str) -> None:
-        """Delete the record with ID `job_id`, if any."""
+        """Delete the record with ID `job_id` and its script, if any."""
         self._path(job_id).unlink(missing_ok=True)
+        self._script_path(job_id).unlink(missing_ok=True)
 
 
 def parse_label_filter(value: str) -> tuple[str, str | None]:

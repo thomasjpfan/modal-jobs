@@ -52,7 +52,10 @@ class Registry:
         return records
 
     @modal.method()
-    def create_job(self, record: dict) -> None:
+    def create_job(self, record: dict, script: str | None = None) -> None:
+        """Record a new job, and save the source of its `script`, if any."""
+        if script is not None:
+            self.store.put_script(record["id"], script)
         self.store.put(record)
         volume.commit()
 
@@ -77,6 +80,14 @@ class Registry:
     @modal.method()
     def get_job(self, id_or_prefix: str) -> dict:
         return self._reconcile([self.store.get(id_or_prefix)])[0]
+
+    @modal.method()
+    def get_script(self, job_id: str) -> str:
+        """Return the script of the job `job_id`, which must be a full ID.
+
+        Raises `FileNotFoundError` if the job has no saved script.
+        """
+        return self.store.get_script(job_id)
 
     @modal.method()
     def stop_job(self, id_or_prefix: str, stopped_by: str) -> dict:

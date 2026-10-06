@@ -256,6 +256,10 @@ def test_tracking_failed(tracking_backend, tmp_path):
     assert record["status"] == "failed"
     assert record["exit_code"] == 3
     assert record["name"] == "fail.py"
+    assert record["script"] == "fail.py"
+    result = CliRunner().invoke(main, ["script", app_id])
+    assert result.exit_code == 0, result.output
+    assert result.output == "import sys\nsys.exit(3)\n"
 
 
 def test_tracking_timed_out(tracking_backend):

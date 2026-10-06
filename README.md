@@ -28,7 +28,7 @@ Stop the job:
 ## Features
 
 - **Tracked history:** every job is recorded with its status, exit code, timestamps,
-  resources, and CPU usage, and its output is saved to a Modal volume.
+  resources, and CPU usage, and its output and script are saved to Modal volumes.
 - **Detach and come back:** start a job with `-d`, then use `logs --follow` or `wait`.
 - **Scripting friendly:** `wait` exits with the job's exit code, and `ls` and `show` can
   print JSON.
@@ -181,7 +181,7 @@ Label: team=ml
 Duration: 59m48s
 ```
 
-### `logs`, `wait`, and `stop`
+### `logs`, `script`, `wait`, and `stop`
 
 ```bash
 # Print a job's saved output, or only the last 50 lines.
@@ -190,6 +190,9 @@ modal-jobs logs -n 50 ap-Hc7p
 
 # Stream the output of a running job until it finishes.
 modal-jobs logs --follow ap-Tq4m
+
+# Print the script a `uv run` job ran, e.g. to save a copy of a heredoc script.
+modal-jobs script ap-Hc7p > finetune.py
 
 # Wait for a job to finish and exit with its exit code. Exits with 124 if --timeout passes.
 modal-jobs wait ap-Tq4m --timeout 2h && echo "training done"
@@ -228,8 +231,8 @@ The backend serves a read-only dashboard. Find its URL with `modal-jobs backend 
 The jobs page shows job counts by status and a table of recent jobs. You can filter it by
 name, label, and status, and it refreshes every 10 seconds.
 
-Click a job to open its page. It shows the job's command and saved output, a timeline of
-when it was submitted, started, and finished, and its resources and environment:
+Click a job to open its page. It shows the job's command, script, and saved output, a
+timeline of when it was submitted, started, and finished, and its resources and environment:
 
 ![A job's page on the dashboard](docs/images/job.png)
 
@@ -237,10 +240,10 @@ when it was submitted, started, and finished, and its resources and environment:
 
 - `modal-jobs` runs each job as a Modal function call in its own ephemeral app. The app ID
   (`ap-...`) is the job ID.
-- The `modal-jobs` backend app records jobs as JSON files on the `modal-jobs-db` volume. A
-  single registry container owns that volume. It checks running jobs against Modal whenever
-  they're read and every 10 minutes, so jobs that finish while detached get their final
-  status.
+- The `modal-jobs` backend app records jobs as JSON files on the `modal-jobs-db` volume,
+  along with the scripts that `uv run` jobs ran. A single registry container owns that
+  volume. It checks running jobs against Modal whenever they're read and every 10 minutes,
+  so jobs that finish while detached get their final status.
 - Each job appends its output to a file on the `modal-jobs-logs` volume, which `logs`
   and the dashboard read.
 - The dashboard is a [Dash](https://dash.plotly.com) app served by the same backend app.

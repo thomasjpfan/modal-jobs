@@ -44,6 +44,7 @@ def test_build_job(tmp_path):
         command=["python", "/root/job.py"],
         local_path=script,
         remote_path="/root/job.py",
+        script="print('hi')",
         dependencies=(),
     )
 
@@ -754,6 +755,7 @@ def test_run_url(monkeypatch):
     assert calls[0].command == ["python", "/root/hello_gpu.py", "--n", "3"]
     assert calls[0].dependencies == ("requests<3", "rich")
     assert calls[0].gpu == "T4"
+    assert calls[0].script == UV_SCRIPT
     assert "Finished running hello_gpu.py" in result.output
 
 
@@ -851,6 +853,7 @@ def test_run_stdin(monkeypatch):
     assert calls[0].command == ["python", "/root/stdin.py", "--n", "3"]
     assert calls[0].dependencies == ("requests<3", "rich")
     assert calls[0].gpu == "T4"
+    assert calls[0].script == UV_SCRIPT
     assert "Finished running stdin.py" in result.output
 
 
@@ -991,6 +994,41 @@ def test_job_record_volume_ids():
     assert _cli.job_record(job, "ap-1", "fc-1")["volume_ids"] == {}
 
 
+def test_job_record_script(tmp_path):
+    script = tmp_path / "train.py"
+    script.write_text(UV_SCRIPT)
+    job = build_job([str(script)], name="exp1")
+
+    assert job.script == UV_SCRIPT
+    assert _cli.job_record(job, "ap-1", "fc-1")["script"] == "train.py"
+    command_job = build_job(["echo", "hi"])
+    assert command_job.script is None
+    assert _cli.job_record(command_job, "ap-1", "fc-1")["script"] is None
+
+
+def test_register_job_saves_script(tmp_path, monkeypatch):
+    from modal_jobs import _backend
+    from modal_jobs._store import JobStore
+
+    store = JobStore(tmp_path / "jobs")
+
+    def create_job(record, script):
+        store.put(record)
+        if script is not None:
+            store.put_script(record["id"], script)
+
+    registry = FakeRegistry(store)
+    registry.create_job = FakeMethod(create_job)
+    monkeypatch.setattr(_backend, "registry", lambda: registry)
+    script = tmp_path / "train.py"
+    script.write_text(UV_SCRIPT)
+
+    _cli.register_job(build_job([str(script)]), "ap-1", "fc-1")
+
+    assert store.get("ap-1")["script"] == "train.py"
+    assert store.get_script("ap-1") == UV_SCRIPT
+
+
 def test_job_record_name():
     job = build_job(["echo", "hi"], image="docker.io/ubuntu")
     assert _cli.job_record(job, "ap-1", "fc-1")["name"] == "ubuntu"
@@ -1103,6 +1141,7 @@ class FakeRegistry:
             lambda limit, status, name=None, labels=None: store.list(limit, status, name, labels)
         )
         self.get_job = FakeMethod(store.get)
+        self.get_script = FakeMethod(store.get_script)
         self.stop_job = FakeMethod(lambda job_id, stopped_by: fake_stop_job(store, job_id))
         self.delete_jobs = FakeMethod(lambda ids: fake_delete_jobs(store, ids))
 
@@ -1388,6 +1427,48 @@ def test_logs_unknown_job(store, saved_logs):
 
     assert result.exit_code == 1
     assert "No job found" in result.output
+
+
+def test_script(store):
+    store.put(make_record("ap-abc", script="train.py"))
+    store.put_script("ap-abc", UV_SCRIPT)
+
+    result = CliRunner().invoke(main, ["script", "ap-a"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output == UV_SCRIPT
+
+
+@pytest.mark.parametrize("fields", [{}, {"script": "train.py"}])
+def test_script_not_saved(store, fields):
+    # Jobs that ran a command, or whose script is missing, have no script to print.
+    store.put(make_record("ap-abc", **fields))
+
+    result = CliRunner().invoke(main, ["script", "ap-abc"])
+
+    assert result.exit_code == 1
+    assert "Job ap-abc has no saved script" in result.output
+
+
+def test_script_unknown_job(store):
+    result = CliRunner().invoke(main, ["script", "ap-x"])
+
+    assert result.exit_code == 1
+    assert "No job found" in result.output
+
+
+def test_show_script(store):
+    store.put(make_record("ap-abc", script="train.py"))
+    store.put(make_record("ap-def"))
+
+    result = CliRunner().invoke(main, ["show", "ap-abc"])
+
+    assert result.exit_code == 0, result.output
+    assert "Script: train.py" in result.output
+    assert "modal-jobs script ap-abc" in result.output
+    result = CliRunner().invoke(main, ["show", "ap-def"])
+    assert "Script:" not in result.output
+    assert "modal-jobs script" not in result.output
 
 
 def test_show_saved_logs_hint(store):

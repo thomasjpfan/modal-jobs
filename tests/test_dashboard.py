@@ -117,6 +117,27 @@ def test_update_job(app, store, logs):
     assert "T4" in shown
 
 
+def test_update_job_script(app, store):
+    store.put(make_record("ap-a", script="train.py"))
+    store.put_script("ap-a", "import torch\nprint('training')\n")
+
+    shown = text(callback(app, "job-detail.children")(None, "/jobs/ap-a"))
+
+    assert "print('training')" in shown
+    assert "train.py \\u00b7 2 lines" in shown
+    # The script is shown in its own section, not again under the details.
+    assert '"Script"' in shown and shown.count('"train.py"') == 0
+
+
+@pytest.mark.parametrize("fields", [{}, {"script": "train.py"}])
+def test_update_job_without_script(app, store, fields):
+    store.put(make_record("ap-a", **fields))
+
+    shown = text(callback(app, "job-detail.children")(None, "/jobs/ap-a"))
+
+    assert '"Script"' not in shown
+
+
 def test_job_view_groups_fields(store):
     record = make_record(
         "ap-a",

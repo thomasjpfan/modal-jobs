@@ -49,6 +49,8 @@ class JobSpec:
     # Script to upload and its path in the container, or None for plain commands.
     local_path: Path | None = None
     remote_path: str | None = None
+    # Source of the script, saved with the job's record.
+    script: str | None = None
     dependencies: tuple[str, ...] = ()
     # (volume name, remote path) pairs of Modal volumes to mount.
     volumes: tuple[tuple[str, str], ...] = ()
@@ -316,13 +318,14 @@ def build_job(
     if image is None and is_script(command):
         local_path = Path(command[0]).resolve()
         remote_path = f"/root/{local_path.name}"
-        metadata = parse_script_metadata(local_path.read_text())
+        script = local_path.read_text()
+        metadata = parse_script_metadata(script)
         function_name = local_path.stem
         command = ["python", remote_path, *command[1:]]
         dependencies = (*metadata.get("dependencies", ()), *extra)
         default_name = local_path.name
     else:
-        local_path = remote_path = None
+        local_path = remote_path = script = None
         function_name = re.sub(r"[^A-Za-z0-9_-]", "_", Path(command[0]).name)
         command = list(command)
         dependencies = extra
@@ -338,6 +341,7 @@ def build_job(
         command=command,
         local_path=local_path,
         remote_path=remote_path,
+        script=script,
         dependencies=dependencies,
         volumes=modal_volumes,
         local_dirs=local_dirs,
@@ -410,6 +414,8 @@ def job_record(
         "call_id": call_id,
         "name": job.name,
         "command": job.command,
+        # The filename of the script saved with the record, if any.
+        "script": job.local_path.name if job.script is not None else None,
         "image": job.image,
         "add_python": job.add_python,
         "dependencies": list(job.dependencies),
@@ -438,11 +444,13 @@ def job_record(
 def register_job(
     job: JobSpec, app_id: str, call_id: str, volume_ids: dict[str, str] | None = None
 ) -> None:
-    """Record `job` with the backend, warning instead of failing if that doesn't work."""
+    """Record `job` and its script with the backend, warning instead of failing if that doesn't work."""
     from modal_jobs import _backend
 
     try:
-        _backend.registry().create_job.remote(job_record(job, app_id, call_id, volume_ids))
+        _backend.registry().create_job.remote(
+            job_record(job, app_id, call_id, volume_ids), job.script
+        )
     # Tracking must never stop the job from running.
     except Exception as e:  # noqa: BLE001
         console.print(
@@ -1046,8 +1054,27 @@ def show(job_id: str, as_json: bool):
         console.print(
             f"\nShow logs:\n  [green]modal app logs {record['id']}[/green]", highlight=False
         )
+    if record.get("script"):
+        console.print(
+            f"\nShow the script:\n  [green]modal-jobs script {record['id']}[/green]",
+            highlight=False,
+        )
     if running:
         console.print(f"\nStop the job:\n  [green]modal-jobs stop {record['id']}[/green]")
+
+
+@main.command("script")
+@click.argument("job_id")
+def script(job_id: str):
+    """Print the script that the job JOB_ID ran, which may be a unique prefix."""
+    record = get_record(job_id)
+    if not record.get("script"):
+        raise click.ClickException(f"Job {record['id']} has no saved script.")
+    try:
+        source = registry_method("get_script").remote(record["id"])
+    except FileNotFoundError as e:
+        raise click.ClickException(f"Job {record['id']} has no saved script.") from e
+    click.echo(source, nl=False)
 
 
 def stream_logs(app_id: str) -> None:

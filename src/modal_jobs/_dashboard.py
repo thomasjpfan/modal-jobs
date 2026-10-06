@@ -118,13 +118,14 @@ FONTS = (
     "&family=Fira+Mono:wght@400;500&display=swap"
 )
 
-# Fields shown elsewhere on the job page: in its header, error, command, or timeline.
+# Fields shown elsewhere on the job page: in its header, error, command, script, or timeline.
 HEADER_FIELDS = {
     "ID",
     "Name",
     "Status",
     "Error",
     "Command",
+    "Script",
     "Exit code",
     "Label",
     "Submitted",
@@ -485,6 +486,21 @@ def log_view(record: dict, log: bytes | None):
     )
 
 
+def script_view(record: dict, script: str):
+    lines = script.count("\n") + (not script.endswith("\n") and bool(script))
+    return section(
+        "Script",
+        dmc.Code(script or "(empty)", block=True, fz="xs", p="md", className="mj-log"),
+        aside=dmc.Group(
+            [
+                dmc.Text(f"{record['script']} · {lines:,} lines", size="xs", c="dimmed"),
+                copy_button(script),
+            ],
+            gap="md",
+        ),
+    )
+
+
 def volume_links(record: dict) -> dict[str, str]:
     """Return the URLs of the volumes of `record` on modal.com, keyed by their field value.
 
@@ -498,8 +514,11 @@ def volume_links(record: dict) -> dict[str, str]:
     }
 
 
-def job_view(record: dict, log: bytes | None, now: float | None = None):
-    """Return the page of the job `record`, whose saved output is `log`, if any."""
+def job_view(record: dict, log: bytes | None, script: str | None = None, now: float | None = None):
+    """Return the page of the job `record`.
+
+    `log` is the job's saved output and `script` its saved script, if any.
+    """
     now = time.time() if now is None else now
     fields = record_fields(record)
     command = dict(fields)["Command"]
@@ -581,6 +600,7 @@ def job_view(record: dict, log: bytes | None, now: float | None = None):
                 dmc.Code(f"$ {command}", block=True, p="md", className="mj-log"),
                 aside=copy_button(command),
             ),
+            *([script_view(record, script)] if script is not None else []),
             log_view(record, log),
         ],
         gap="md",
@@ -702,6 +722,15 @@ def create_app(get_registry: Callable, read_log: Callable[[str], bytes]) -> Dash
     `get_registry` returns a handle to the `Registry`, and `read_log` returns the saved
     output of a job, raising `FileNotFoundError` if it has none.
     """
+
+    def read_script(record: dict) -> str | None:
+        if not record.get("script"):
+            return None
+        try:
+            return get_registry().get_script.remote(record["id"])
+        except FileNotFoundError:
+            return None
+
     app = Dash(
         __name__,
         title="modal-jobs",
@@ -809,6 +838,6 @@ def create_app(get_registry: Callable, read_log: Callable[[str], bytes]) -> Dash
             log = read_log(record["id"])
         except FileNotFoundError:
             log = None
-        return job_view(record, log)
+        return job_view(record, log, read_script(record))
 
     return app
