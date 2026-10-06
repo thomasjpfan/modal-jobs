@@ -78,15 +78,15 @@ modal-jobs uv run examples/02_script_deps.py
 # Add packages that aren't declared in the script.
 modal-jobs uv run --with rich --with "requests>=2,<3" examples/03_with.py
 
-# Run on a GPU.
-modal-jobs uv run --gpu T4 examples/05_gpu.py
-
-# Arguments after the script are passed to it.
-modal-jobs uv run --gpu A100-80GB --timeout 4h finetune.py --epochs 3
+# Run on a GPU, and stop the job after 10 minutes.
+modal-jobs uv run --gpu T4 --timeout 10m examples/05_gpu.py
 
 # The script may also be a URL, or `-` to read it from stdin.
-modal-jobs uv run https://example.com/script.py
-cat script.py | modal-jobs uv run -
+modal-jobs uv run https://raw.githubusercontent.com/thomasjpfan/modal-jobs/main/examples/02_script_deps.py
+cat examples/01_hello_world.py | modal-jobs uv run -
+
+# Arguments after the script are passed to it.
+echo 'import sys; print(sys.argv[1:])' | modal-jobs uv run - --epochs 3
 
 # Commands that don't start with a script are run as is.
 modal-jobs uv run python -c 'print("hi")'
