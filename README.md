@@ -69,6 +69,7 @@ Python script, the script is uploaded and run with its
 # dependencies = ["requests<3", "rich"]
 # ///
 import requests
+
 ...
 ```
 
