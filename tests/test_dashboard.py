@@ -198,3 +198,10 @@ def test_tail_log():
     assert tail.startswith("... showing the last 200 KiB ...\n")
     assert tail.endswith("end")
     assert "start" not in tail
+
+
+def test_index_uses_logo_favicon(app):
+    html = app.interpolate_index(
+        metas="", title="", css="", config="", scripts="", app_entry="", favicon="", renderer=""
+    )
+    assert '<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,' in html

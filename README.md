@@ -1,4 +1,9 @@
-# modal-jobs
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/logo-dark.svg">
+    <img alt="modal-jobs" src="docs/images/logo-light.svg" width="300">
+  </picture>
+</h1>
 
 Run scripts and container commands on [Modal](https://modal.com) as tracked jobs. You can
 list, inspect, stream, wait on, stop, and clean up jobs from the command line or from a web

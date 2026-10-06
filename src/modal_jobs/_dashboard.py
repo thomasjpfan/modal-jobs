@@ -7,6 +7,7 @@ of the jobs volume and running jobs are reconciled whenever the dashboard shows 
 import re
 import time
 from collections.abc import Callable
+from urllib.parse import quote
 
 import dash_mantine_components as dmc
 from dash import Dash, Input, Output, dcc, html
@@ -173,12 +174,25 @@ body {
 }
 """
 
+# The logo's icon, as an SVG that follows the browser's color scheme.
+FAVICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80">'
+    "<style>.t{fill:#f6f8fa;stroke:#d0d7de}.f{fill:#1f2328}"
+    "@media (prefers-color-scheme:dark){.t{fill:#181818;stroke:#3b3b3b}.f{fill:#e6edf3}}</style>"
+    '<rect class="t" x="1" y="1" width="78" height="78" rx="16" stroke-width="2"/>'
+    '<circle cx="17" cy="22" r="5" fill="#4fbf2e"/><rect class="f" x="28" y="19" width="44" height="6" rx="3"/>'
+    '<circle cx="17" cy="40" r="5" fill="#d176bd"/><rect class="f" x="28" y="37" width="32" height="6" rx="3"/>'
+    '<circle cx="17" cy="58" r="5" fill="#dc3636"/><rect class="f" x="28" y="55" width="38" height="6" rx="3"/>'
+    "</svg>"
+)
+FAVICON = f'<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,{quote(FAVICON_SVG)}">'
+
 INDEX_STRING = f"""<!DOCTYPE html>
 <html>
   <head>
     {{%metas%}}
     <title>{{%title%}}</title>
-    {{%favicon%}}
+    {FAVICON}
     {{%css%}}
     <style>{STYLES}</style>
   </head>
