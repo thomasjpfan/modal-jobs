@@ -13,7 +13,6 @@ from dash import Dash, Input, Output, dcc, html
 
 from modal_jobs._format import (
     format_duration,
-    format_labels,
     record_duration,
     record_fields,
 )
@@ -102,6 +101,14 @@ STATUS_COLORS = {
     TIMED_OUT: "modal-red",
 }
 
+# Status colors as CSS colors, for the dots drawn outside Mantine components.
+DOT_COLORS = {
+    RUNNING: "var(--mantine-color-modal-pink-6)",
+    SUCCEEDED: "var(--mantine-color-modal-green-9)",
+    FAILED: "var(--mantine-color-modal-red-5)",
+    TIMED_OUT: "var(--mantine-color-modal-red-5)",
+}
+
 FONTS = (
     "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600"
     "&family=Fira+Mono:wght@400;500&display=swap"
@@ -110,15 +117,103 @@ FONTS = (
 # Fields shown elsewhere on the job page.
 HEADER_FIELDS = {"ID", "Name", "Status", "Error", "Command"}
 
+# Styles that Mantine's props cannot express: the page glow, the sticky header, the
+# pulsing dots, and the table and log chrome.
+STYLES = """
+body {
+  background-image: radial-gradient(1000px 420px at 50% -180px, rgba(127, 238, 100, 0.09), transparent 70%);
+  background-attachment: fixed;
+  min-height: 100vh;
+}
+.mj-header {
+  position: sticky; top: 0; z-index: 10;
+  background: rgba(20, 20, 20, 0.72);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--mantine-color-dark-5);
+}
+.mj-logo {
+  width: 22px; height: 22px; border-radius: 6px;
+  background: linear-gradient(135deg, #7fee64, #28c700);
+  box-shadow: 0 0 18px rgba(127, 238, 100, 0.35);
+}
+.mj-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; }
+.mj-pulse { animation: mj-pulse 1.8s ease-out infinite; }
+@keyframes mj-pulse {
+  0% { box-shadow: 0 0 0 0 currentColor; }
+  70%, 100% { box-shadow: 0 0 0 6px transparent; }
+}
+.mj-table thead th {
+  background: var(--mantine-color-dark-8);
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.mj-table tbody tr:last-child td { border-bottom: none; }
+.mj-id { color: var(--mantine-color-modal-green-9); white-space: nowrap; }
+.mj-id:hover { color: #a6f590; }
+.mj-log {
+  background: #0d0d0d; border: 1px solid var(--mantine-color-dark-5);
+  max-height: 640px; overflow: auto; line-height: 1.6;
+}
+"""
 
-def status_badge(status: str):
+INDEX_STRING = f"""<!DOCTYPE html>
+<html>
+  <head>
+    {{%metas%}}
+    <title>{{%title%}}</title>
+    {{%favicon%}}
+    {{%css%}}
+    <style>{STYLES}</style>
+  </head>
+  <body>
+    {{%app_entry%}}
+    <footer>{{%config%}}{{%scripts%}}{{%renderer%}}</footer>
+  </body>
+</html>
+"""
+
+
+def status_dot(status: str):
+    color = DOT_COLORS.get(status, "var(--mantine-color-dark-2)")
+    return html.Span(
+        className="mj-dot mj-pulse" if status == RUNNING else "mj-dot",
+        style={"background": color, "color": color},
+    )
+
+
+def status_badge(status: str, size: str = "md"):
+    # Mantine's light badges dim the text too much on the dark palette.
+    text_color = DOT_COLORS.get(status, "var(--mantine-color-dark-0)")
     return dmc.Badge(
         status.replace("_", " "),
+        leftSection=status_dot(status),
         color=STATUS_COLORS.get(status, "gray"),
         variant="light",
-        radius="sm",
+        radius="xl",
+        size=size,
         tt="none",
-        ff="monospace",
+        fw=500,
+        styles={"label": {"color": text_color}},
+    )
+
+
+def label_pills(record: dict):
+    labels = record.get("labels") or {}
+    if not labels:
+        return mono("-", c="dimmed")
+    return dmc.Group(
+        [
+            dmc.Badge(
+                f"{key}={value}" if value else key,
+                variant="outline",
+                color="dark.2",
+                radius="sm",
+                tt="none",
+                fw=400,
+                ff="monospace",
+            )
+            for key, value in labels.items()
+        ],
+        gap=4,
     )
 
 
@@ -126,10 +221,60 @@ def mono(text: str, **kwargs):
     return dmc.Text(text, ff="monospace", size="sm", **kwargs)
 
 
+def stat_card(title: str, count: int, status: str | None = None):
+    return dmc.Paper(
+        dmc.Stack(
+            [
+                dmc.Group(
+                    [
+                        *([status_dot(status)] if status else []),
+                        dmc.Text(title, size="xs", c="dimmed", tt="uppercase", lts="0.06em"),
+                    ],
+                    gap=8,
+                ),
+                dmc.Text(str(count), fz=28, fw=500, lh=1),
+            ],
+            gap=10,
+        ),
+        withBorder=True,
+        p="md",
+        bg="dark.8",
+    )
+
+
+def stats_view(records: list[dict]):
+    """Return a row of cards counting the jobs `records` by status."""
+    counts = {status: 0 for status in STATUSES}
+    for record in records:
+        counts[record["status"]] = counts.get(record["status"], 0) + 1
+    return dmc.SimpleGrid(
+        [
+            stat_card("Jobs", len(records)),
+            stat_card("Running", counts[RUNNING], RUNNING),
+            stat_card("Succeeded", counts[SUCCEEDED], SUCCEEDED),
+            stat_card("Failed", counts[FAILED] + counts[TIMED_OUT], FAILED),
+        ],
+        cols={"base": 2, "sm": 4},
+        spacing="md",
+    )
+
+
 def jobs_view(records: list[dict], now: float | None = None):
     """Return the table of the jobs `records`."""
     if not records:
-        return dmc.Text("No jobs found.", c="dimmed", py="xl", ta="center")
+        return dmc.Stack(
+            [
+                dmc.Text("No jobs found.", fw=500),
+                dmc.Text(
+                    ["Submit one with ", dmc.Code("modal-jobs run script.py"), "."],
+                    c="dimmed",
+                    size="sm",
+                ),
+            ],
+            align="center",
+            gap=6,
+            py=48,
+        )
     now = time.time() if now is None else now
     headers = ["ID", "Name", "Status", "Submitted", "Duration", "GPU", "Labels"]
     rows = [
@@ -137,17 +282,21 @@ def jobs_view(records: list[dict], now: float | None = None):
             [
                 dmc.TableTd(
                     dmc.Anchor(
-                        record["id"], href=f"/jobs/{record['id']}", ff="monospace", size="sm"
+                        record["id"],
+                        href=f"/jobs/{record['id']}",
+                        ff="monospace",
+                        size="sm",
+                        className="mj-id",
                     )
                 ),
-                dmc.TableTd(dmc.Text(record["name"], size="sm", truncate="end", maw=320)),
+                dmc.TableTd(dmc.Text(record["name"], size="sm", fw=500, truncate="end", maw=320)),
                 dmc.TableTd(status_badge(record["status"])),
                 dmc.TableTd(
                     mono(f"{format_duration(now - record['submitted_at'])} ago", c="dimmed")
                 ),
                 dmc.TableTd(mono(record_duration(record, now), c="dimmed")),
                 dmc.TableTd(mono(record.get("gpu") or "-", c="dimmed")),
-                dmc.TableTd(mono(format_labels(record), c="dimmed", truncate="end", maw=240)),
+                dmc.TableTd(label_pills(record)),
             ]
         )
         for record in records
@@ -157,7 +306,7 @@ def jobs_view(records: list[dict], now: float | None = None):
             [
                 dmc.TableThead(
                     dmc.TableTr(
-                        [dmc.TableTh(dmc.Text(h, size="xs", c="dimmed", fw=500)) for h in headers]
+                        [dmc.TableTh(dmc.Text(h, fz=11, c="dimmed", fw=500)) for h in headers]
                     )
                 ),
                 dmc.TableTbody(rows),
@@ -165,6 +314,7 @@ def jobs_view(records: list[dict], now: float | None = None):
             highlightOnHover=True,
             verticalSpacing="sm",
             horizontalSpacing="md",
+            className="mj-table",
         ),
         minWidth=880,
     )
@@ -178,12 +328,15 @@ def tail_log(log: bytes) -> str:
     return f"... showing the last {LOG_TAIL_BYTES // 1024} KiB ...\n{tail}"
 
 
-def job_view(record: dict, log: bytes | None):
+def job_view(record: dict, log: bytes | None, now: float | None = None):
     """Return the page of the job `record`, whose saved output is `log`, if any."""
+    now = time.time() if now is None else now
     all_fields = record_fields(record)
     fields = [(label, value) for label, value in all_fields if label not in HEADER_FIELDS]
     if log is not None:
-        log_body = dmc.Code(tail_log(log) or "(no output)", block=True, fz="xs")
+        log_body = dmc.Code(
+            tail_log(log) or "(no output)", block=True, fz="xs", p="md", className="mj-log"
+        )
     elif record["status"] == RUNNING:
         log_body = dmc.Text(
             [
@@ -197,31 +350,76 @@ def job_view(record: dict, log: bytes | None):
         log_body = dmc.Text("No saved output.", c="dimmed", size="sm")
     return dmc.Stack(
         [
-            dmc.Anchor("← All jobs", href="/", size="sm"),
-            dmc.Group(
-                [dmc.Title(record["name"], order=2), status_badge(record["status"])],
-                gap="sm",
+            back_link(),
+            dmc.Paper(
+                dmc.Stack(
+                    [
+                        dmc.Group(
+                            [
+                                dmc.Title(record["name"], order=2, fw=500),
+                                status_badge(record["status"], size="lg"),
+                            ],
+                            gap="sm",
+                        ),
+                        dmc.Group(
+                            [
+                                mono(record["id"], c="dimmed"),
+                                dmc.Text("·", c="dark.3"),
+                                dmc.Text(
+                                    f"submitted {format_duration(now - record['submitted_at'])} ago",
+                                    size="sm",
+                                    c="dimmed",
+                                ),
+                                dmc.Text("·", c="dark.3"),
+                                dmc.Text(
+                                    f"ran for {record_duration(record, now)}", size="sm", c="dimmed"
+                                ),
+                            ],
+                            gap=8,
+                        ),
+                        *([label_pills(record)] if record.get("labels") else []),
+                    ],
+                    gap="xs",
+                ),
+                withBorder=True,
+                p="lg",
+                bg="dark.8",
             ),
-            mono(record["id"], c="dimmed"),
             *(
-                [dmc.Alert(record["error"], color="modal-red", variant="light", title="Error")]
+                [
+                    dmc.Alert(
+                        record["error"],
+                        color="modal-red",
+                        variant="outline",
+                        title="Error",
+                        styles={"root": {"background": "rgba(220, 54, 54, 0.08)"}},
+                    )
+                ]
                 if record.get("error")
                 else []
             ),
-            section("Command", dmc.Code(dict(all_fields)["Command"], block=True)),
+            section(
+                "Command",
+                dmc.Code(
+                    f"$ {dict(all_fields)['Command']}", block=True, p="md", className="mj-log"
+                ),
+            ),
             section(
                 "Details",
                 dmc.SimpleGrid(
                     [
                         dmc.Stack(
-                            [dmc.Text(label, size="xs", c="dimmed"), mono(value)],
-                            gap=2,
+                            [
+                                dmc.Text(label, fz=11, c="dimmed", tt="uppercase", lts="0.06em"),
+                                mono(value),
+                            ],
+                            gap=4,
                         )
                         for label, value in fields
                     ],
                     cols={"base": 1, "sm": 2, "md": 3},
                     spacing="lg",
-                    verticalSpacing="md",
+                    verticalSpacing="lg",
                 ),
             ),
             section("Output", log_body),
@@ -232,18 +430,19 @@ def job_view(record: dict, log: bytes | None):
 
 def section(title: str, body):
     return dmc.Paper(
-        dmc.Stack([dmc.Text(title, size="sm", fw=500), body], gap="sm"),
+        dmc.Stack([dmc.Text(title, size="sm", fw=500), body], gap="md"),
         withBorder=True,
         p="lg",
         bg="dark.8",
     )
 
 
+def back_link():
+    return dmc.Anchor("← All jobs", href="/", size="sm", c="dimmed", w="fit-content")
+
+
 def not_found(message: str):
-    return dmc.Stack(
-        [dmc.Anchor("← All jobs", href="/", size="sm"), dmc.Text(message, c="dimmed")],
-        gap="md",
-    )
+    return dmc.Stack([back_link(), dmc.Text(message, c="dimmed")], gap="md")
 
 
 def jobs_page():
@@ -251,41 +450,51 @@ def jobs_page():
         [
             dmc.Group(
                 [
-                    dmc.Select(
-                        id="status-filter",
-                        value="all",
-                        data=[{"value": "all", "label": "all statuses"}]
-                        + [{"value": s, "label": s.replace("_", " ")} for s in STATUSES],
-                        # Keep a status selected, so the filter is never empty.
-                        allowDeselect=False,
-                        size="xs",
-                        w=160,
+                    dmc.Stack(
+                        [
+                            dmc.Title("Jobs", order=2, fw=500),
+                            dmc.Text(
+                                "Newest first, refreshed every 10 seconds.", size="sm", c="dimmed"
+                            ),
+                        ],
+                        gap=4,
                     ),
                     dmc.Group(
                         [
                             dmc.TextInput(
-                                id="label-filter",
-                                placeholder="Filter by label, e.g. team=ml exp",
-                                size="xs",
-                                w=240,
+                                id="name-filter",
+                                placeholder="Filter by name",
+                                size="sm",
+                                w=200,
                                 debounce=300,
                             ),
                             dmc.TextInput(
-                                id="name-filter",
-                                placeholder="Filter by name",
-                                size="xs",
-                                w=240,
+                                id="label-filter",
+                                placeholder="Labels, e.g. team=ml exp",
+                                size="sm",
+                                w=220,
                                 debounce=300,
+                            ),
+                            dmc.Select(
+                                id="status-filter",
+                                value="all",
+                                data=[{"value": "all", "label": "All statuses"}]
+                                + [{"value": s, "label": s.replace("_", " ")} for s in STATUSES],
+                                # Keep a status selected, so the filter is never empty.
+                                allowDeselect=False,
+                                size="sm",
+                                w=150,
                             ),
                         ],
                         gap="sm",
                     ),
                 ],
                 justify="space-between",
+                align="flex-end",
             ),
-            dmc.Paper(html.Div(id="jobs-table"), withBorder=True, bg="dark.8"),
+            html.Div(id="jobs-table"),
         ],
-        gap="md",
+        gap="lg",
     )
 
 
@@ -311,6 +520,7 @@ def create_app(get_registry: Callable, read_log: Callable[[str], bytes]) -> Dash
         suppress_callback_exceptions=True,
         update_title=None,
     )
+    app.index_string = INDEX_STRING
     app.layout = dmc.MantineProvider(
         [
             dcc.Location(id="url"),
@@ -320,18 +530,36 @@ def create_app(get_registry: Callable, read_log: Callable[[str], bytes]) -> Dash
                     dmc.Group(
                         [
                             dmc.Anchor(
-                                dmc.Text("modal-jobs", ff="monospace", fw=500, c="dark.0"),
+                                dmc.Group(
+                                    [
+                                        html.Div(className="mj-logo"),
+                                        dmc.Text("modal-jobs", ff="monospace", fw=500, c="dark.0"),
+                                    ],
+                                    gap=10,
+                                ),
                                 href="/",
                                 underline="never",
                             ),
-                            dmc.Text("Jobs", size="sm", c="dimmed"),
+                            dmc.Group(
+                                [
+                                    html.Span(
+                                        className="mj-dot mj-pulse",
+                                        style={
+                                            "background": DOT_COLORS[SUCCEEDED],
+                                            "color": DOT_COLORS[SUCCEEDED],
+                                        },
+                                    ),
+                                    dmc.Text("Live", size="xs", c="dimmed"),
+                                ],
+                                gap=8,
+                            ),
                         ],
-                        gap="lg",
-                        h=56,
+                        justify="space-between",
+                        h=60,
                     ),
                     size="xl",
                 ),
-                style={"borderBottom": "1px solid var(--mantine-color-dark-5)"},
+                className="mj-header",
             ),
             dmc.Container(html.Div(id="page"), size="xl", py="xl"),
         ],
@@ -362,7 +590,13 @@ def create_app(get_registry: Callable, read_log: Callable[[str], bytes]) -> Dash
         )
         if name:
             records = [record for record in records if name.lower() in record["name"].lower()]
-        return jobs_view(records[:MAX_JOBS])
+        return dmc.Stack(
+            [
+                stats_view(records),
+                dmc.Paper(jobs_view(records[:MAX_JOBS]), withBorder=True, bg="dark.8"),
+            ],
+            gap="md",
+        )
 
     @app.callback(
         Output("job-detail", "children"),

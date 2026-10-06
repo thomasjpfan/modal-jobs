@@ -51,7 +51,7 @@ def test_serves_page_and_layout(app):
 def test_route(app):
     route = callback(app, "page.children")
 
-    assert route("/").children[1].children.id == "jobs-table"
+    assert route("/").children[1].id == "jobs-table"
     assert route("/jobs/ap-1").id == "job-detail"
 
 
@@ -79,7 +79,7 @@ def test_update_jobs_labels(app, store):
     update_jobs = callback(app, "jobs-table.children")
 
     shown = text(update_jobs(None, "all", None, None))
-    assert "team=ml,exp=1" in shown
+    assert "team=ml" in shown and "exp=1" in shown
 
     def shown_ids(labels):
         shown = text(update_jobs(None, "all", None, labels))
@@ -132,6 +132,20 @@ def test_update_job_missing(app, store):
 
     assert "No job found with ID 'ap-z'" in text(update_job(None, "/jobs/ap-z"))
     assert "ambiguous" in text(update_job(None, "/jobs/ap"))
+
+
+def test_stats_view():
+    records = [
+        make_record("ap-a"),
+        make_record("ap-b", status="failed"),
+        make_record("ap-c", status="timed_out"),
+        make_record("ap-d", status="succeeded"),
+    ]
+
+    cards = _dashboard.stats_view(records).children
+    counts = [card.children.children[1].children for card in cards]
+
+    assert counts == ["4", "1", "1", "2"]
 
 
 def test_tail_log():
