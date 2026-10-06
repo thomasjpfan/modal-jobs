@@ -812,7 +812,7 @@ def uv_run(
     """
     with tempfile.TemporaryDirectory() as tmp:
         if command[0] == "-":
-            script = click.get_text_stream("stdin").read()
+            script = sys.stdin.read()
             if not script.strip():
                 raise click.BadParameter("No script provided on stdin.", param_hint="COMMAND")
             local_path = Path(tmp) / "stdin.py"
