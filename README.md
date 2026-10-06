@@ -88,6 +88,15 @@ cat examples/01_hello_world.py | modal-jobs uv run -
 # Arguments after the script are passed to it.
 echo 'import sys; print(sys.argv[1:])' | modal-jobs uv run - --epochs 3
 
+# Write a script inline with a heredoc. Quote 'EOF' so the shell doesn't expand it.
+modal-jobs uv run - <<'EOF'
+# /// script
+# dependencies = ["rich"]
+# ///
+from rich import print
+print("[bold green]Hello from Modal![/bold green]")
+EOF
+
 # Commands that don't start with a script are run as is.
 modal-jobs uv run python -c 'print("hi")'
 ```
