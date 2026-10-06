@@ -358,6 +358,17 @@ def copy_button(value: str):
     )
 
 
+def modal_link(label: str, object_id: str):
+    """Return a link to the page of the Modal object `object_id` on modal.com."""
+    return dmc.Anchor(
+        f"{label} ↗",
+        href=f"https://modal.com/id/{object_id}",
+        target="_blank",
+        size="xs",
+        c="dimmed",
+    )
+
+
 def key_stat(label: str, value: str):
     return dmc.Stack(
         [dmc.Text(label, fz=11, c="dimmed", tt="uppercase", lts="0.06em"), mono(value, fz="md")],
@@ -418,12 +429,22 @@ def log_view(record: dict, log: bytes | None):
             ]
         else:
             message = "No saved output."
-        return section("Output", dmc.Text(message, c="dimmed", size="sm"))
+        return section(
+            "Output",
+            dmc.Text(message, c="dimmed", size="sm"),
+            aside=modal_link("Logs", record["id"]),
+        )
     lines = log.count(b"\n") + (not log.endswith(b"\n") and bool(log))
     return section(
         "Output",
         dmc.Code(tail_log(log) or "(no output)", block=True, fz="xs", p="md", className="mj-log"),
-        aside=dmc.Text(f"{lines:,} lines · {format_bytes(len(log))}", size="xs", c="dimmed"),
+        aside=dmc.Group(
+            [
+                dmc.Text(f"{lines:,} lines · {format_bytes(len(log))}", size="xs", c="dimmed"),
+                modal_link("Logs", record["id"]),
+            ],
+            gap="md",
+        ),
     )
 
 
@@ -450,7 +471,16 @@ def job_view(record: dict, log: bytes | None, now: float | None = None):
                     gap="sm",
                 ),
                 dmc.Group(
-                    [mono(record["id"], c="dimmed"), copy_button(record["id"])],
+                    [
+                        mono(record["id"], c="dimmed"),
+                        copy_button(record["id"]),
+                        modal_link("App", record["id"]),
+                        *(
+                            [modal_link("Function call", record["call_id"])]
+                            if record.get("call_id")
+                            else []
+                        ),
+                    ],
                     gap=6,
                 ),
                 *([label_pills(record)] if record.get("labels") else []),

@@ -139,6 +139,13 @@ def test_job_view_groups_fields(store):
     assert '"Label"' not in shown and '"GPU"' in shown and shown.count('"T4"') == 1
 
 
+def test_job_view_links_to_modal():
+    shown = text(_dashboard.job_view(make_record("ap-a"), None))
+
+    assert "https://modal.com/id/ap-a" in shown
+    assert "https://modal.com/id/fc-ap-a" in shown
+
+
 def test_update_job_running_without_log(app, store):
     store.put(make_record("ap-a"))
 
