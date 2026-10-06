@@ -12,7 +12,10 @@ import dash_mantine_components as dmc
 from dash import Dash, Input, Output, dcc, html
 
 from modal_jobs._format import (
+    format_bytes,
     format_duration,
+    format_exit_code,
+    format_timestamp,
     record_duration,
     record_fields,
 )
@@ -114,8 +117,23 @@ FONTS = (
     "&family=Fira+Mono:wght@400;500&display=swap"
 )
 
-# Fields shown elsewhere on the job page.
-HEADER_FIELDS = {"ID", "Name", "Status", "Error", "Command"}
+# Fields shown elsewhere on the job page: in its header, error, command, or timeline.
+HEADER_FIELDS = {
+    "ID",
+    "Name",
+    "Status",
+    "Error",
+    "Command",
+    "Exit code",
+    "Label",
+    "Submitted",
+    "Started",
+    "Finished",
+    "Duration",
+    "GPU",
+}
+# Fields shown under resources on the job page. The rest are shown under environment.
+RESOURCE_FIELDS = {"CPU", "Memory", "Timeout", "Retries", "CPU time", "Container"}
 
 # Styles that Mantine's props cannot express: the page glow, the sticky header, the
 # pulsing dots, and the table and log chrome.
@@ -328,109 +346,196 @@ def tail_log(log: bytes) -> str:
     return f"... showing the last {LOG_TAIL_BYTES // 1024} KiB ...\n{tail}"
 
 
-def job_view(record: dict, log: bytes | None, now: float | None = None):
-    """Return the page of the job `record`, whose saved output is `log`, if any."""
-    now = time.time() if now is None else now
-    all_fields = record_fields(record)
-    fields = [(label, value) for label, value in all_fields if label not in HEADER_FIELDS]
-    if log is not None:
-        log_body = dmc.Code(
-            tail_log(log) or "(no output)", block=True, fz="xs", p="md", className="mj-log"
-        )
-    elif record["status"] == RUNNING:
-        log_body = dmc.Text(
-            [
-                "The output is saved when the job finishes. Stream it with ",
-                dmc.Code(f"modal-jobs logs --follow {record['id']}"),
-            ],
-            c="dimmed",
-            size="sm",
-        )
-    else:
-        log_body = dmc.Text("No saved output.", c="dimmed", size="sm")
+def copy_button(value: str):
+    return dmc.CopyButton(
+        "Copy",
+        value=value,
+        copiedChildren="Copied",
+        variant="subtle",
+        color="gray",
+        copiedColor="modal-green.9",
+        size="compact-xs",
+    )
+
+
+def key_stat(label: str, value: str):
+    return dmc.Stack(
+        [dmc.Text(label, fz=11, c="dimmed", tt="uppercase", lts="0.06em"), mono(value, fz="md")],
+        gap=4,
+    )
+
+
+def timeline(record: dict):
+    """Return the timeline of when the job of `record` was submitted, started, and finished."""
+    events = [
+        ("Submitted", record["submitted_at"]),
+        ("Started", record.get("started_at")),
+        ("Finished", record.get("finished_at")),
+    ]
+    reached = sum(timestamp is not None for _, timestamp in events)
+    color = DOT_COLORS.get(record["status"], "var(--mantine-color-dark-2)")
+    return dmc.Timeline(
+        [
+            dmc.TimelineItem(
+                mono(format_timestamp(timestamp), c="dimmed", fz="xs"),
+                title=dmc.Text(title, size="sm"),
+            )
+            for title, timestamp in events
+        ],
+        active=reached - 1,
+        color=color,
+        bulletSize=12,
+        lineWidth=2,
+    )
+
+
+def field_list(fields: list[tuple[str, str]]):
+    """Return a list of the `fields`, joining the values of fields with the same label."""
+    grouped: dict[str, list[str]] = {}
+    for label, value in fields:
+        grouped.setdefault(label, []).append(value)
     return dmc.Stack(
         [
-            back_link(),
-            dmc.Paper(
-                dmc.Stack(
-                    [
-                        dmc.Group(
-                            [
-                                dmc.Title(record["name"], order=2, fw=500),
-                                status_badge(record["status"], size="lg"),
-                            ],
-                            gap="sm",
-                        ),
-                        dmc.Group(
-                            [
-                                mono(record["id"], c="dimmed"),
-                                dmc.Text("·", c="dark.3"),
-                                dmc.Text(
-                                    f"submitted {format_duration(now - record['submitted_at'])} ago",
-                                    size="sm",
-                                    c="dimmed",
-                                ),
-                                dmc.Text("·", c="dark.3"),
-                                dmc.Text(
-                                    f"ran for {record_duration(record, now)}", size="sm", c="dimmed"
-                                ),
-                            ],
-                            gap=8,
-                        ),
-                        *([label_pills(record)] if record.get("labels") else []),
-                    ],
-                    gap="xs",
-                ),
-                withBorder=True,
-                p="lg",
-                bg="dark.8",
-            ),
-            *(
+            dmc.Stack(
                 [
-                    dmc.Alert(
-                        record["error"],
-                        color="modal-red",
-                        variant="outline",
-                        title="Error",
-                        styles={"root": {"background": "rgba(220, 54, 54, 0.08)"}},
-                    )
-                ]
-                if record.get("error")
-                else []
-            ),
-            section(
-                "Command",
-                dmc.Code(
-                    f"$ {dict(all_fields)['Command']}", block=True, p="md", className="mj-log"
-                ),
-            ),
-            section(
-                "Details",
-                dmc.SimpleGrid(
-                    [
-                        dmc.Stack(
-                            [
-                                dmc.Text(label, fz=11, c="dimmed", tt="uppercase", lts="0.06em"),
-                                mono(value),
-                            ],
-                            gap=4,
-                        )
-                        for label, value in fields
-                    ],
-                    cols={"base": 1, "sm": 2, "md": 3},
-                    spacing="lg",
-                    verticalSpacing="lg",
-                ),
-            ),
-            section("Output", log_body),
+                    dmc.Text(label, fz=11, c="dimmed", tt="uppercase", lts="0.06em"),
+                    *(mono(value, style={"wordBreak": "break-all"}) for value in values),
+                ],
+                gap=4,
+            )
+            for label, values in grouped.items()
         ],
         gap="md",
     )
 
 
-def section(title: str, body):
+def log_view(record: dict, log: bytes | None):
+    if log is None:
+        if record["status"] == RUNNING:
+            message = [
+                "The output is saved when the job finishes. Stream it with ",
+                dmc.Code(f"modal-jobs logs --follow {record['id']}"),
+            ]
+        else:
+            message = "No saved output."
+        return section("Output", dmc.Text(message, c="dimmed", size="sm"))
+    lines = log.count(b"\n") + (not log.endswith(b"\n") and bool(log))
+    return section(
+        "Output",
+        dmc.Code(tail_log(log) or "(no output)", block=True, fz="xs", p="md", className="mj-log"),
+        aside=dmc.Text(f"{lines:,} lines · {format_bytes(len(log))}", size="xs", c="dimmed"),
+    )
+
+
+def job_view(record: dict, log: bytes | None, now: float | None = None):
+    """Return the page of the job `record`, whose saved output is `log`, if any."""
+    now = time.time() if now is None else now
+    fields = record_fields(record)
+    command = dict(fields)["Command"]
+    resources = [(label, value) for label, value in fields if label in RESOURCE_FIELDS]
+    environment = [
+        (label, value)
+        for label, value in fields
+        if label not in HEADER_FIELDS and label not in RESOURCE_FIELDS
+    ]
+    running = record["status"] == RUNNING
+    header = dmc.Paper(
+        dmc.Stack(
+            [
+                dmc.Group(
+                    [
+                        dmc.Title(record["name"], order=2, fw=500),
+                        status_badge(record["status"], size="lg"),
+                    ],
+                    gap="sm",
+                ),
+                dmc.Group(
+                    [mono(record["id"], c="dimmed"), copy_button(record["id"])],
+                    gap=6,
+                ),
+                *([label_pills(record)] if record.get("labels") else []),
+                dmc.Divider(color="dark.5", my=4),
+                dmc.SimpleGrid(
+                    [
+                        key_stat(
+                            "Running for" if running else "Duration", record_duration(record, now)
+                        ),
+                        key_stat(
+                            "Submitted", f"{format_duration(now - record['submitted_at'])} ago"
+                        ),
+                        key_stat("GPU", record.get("gpu") or "none"),
+                        key_stat(
+                            "Exit code",
+                            format_exit_code(record)
+                            if record.get("exit_code") is not None
+                            else "-",
+                        ),
+                    ],
+                    cols={"base": 2, "sm": 4},
+                    spacing="lg",
+                ),
+            ],
+            gap="sm",
+        ),
+        withBorder=True,
+        p="lg",
+        bg="dark.8",
+    )
+    error = (
+        [
+            dmc.Alert(
+                record["error"],
+                color="modal-red",
+                variant="outline",
+                title="Error",
+                styles={"root": {"background": "rgba(220, 54, 54, 0.08)"}},
+            )
+        ]
+        if record.get("error")
+        else []
+    )
+    main = dmc.Stack(
+        [
+            section(
+                "Command",
+                dmc.Code(f"$ {command}", block=True, p="md", className="mj-log"),
+                aside=copy_button(command),
+            ),
+            log_view(record, log),
+        ],
+        gap="md",
+    )
+    sidebar = dmc.Stack(
+        [
+            section("Timeline", timeline(record)),
+            *([section("Resources", field_list(resources))] if resources else []),
+            *([section("Environment", field_list(environment))] if environment else []),
+        ],
+        gap="md",
+    )
+    return dmc.Stack(
+        [
+            back_link(),
+            header,
+            *error,
+            dmc.Grid(
+                [
+                    dmc.GridCol(main, span={"base": 12, "md": 8}),
+                    dmc.GridCol(sidebar, span={"base": 12, "md": 4}),
+                ],
+                gutter="md",
+            ),
+        ],
+        gap="md",
+    )
+
+
+def section(title: str, body, aside=None):
+    heading = dmc.Text(title, size="sm", fw=500)
+    if aside is not None:
+        heading = dmc.Group([heading, aside], justify="space-between", h=22)
     return dmc.Paper(
-        dmc.Stack([dmc.Text(title, size="sm", fw=500), body], gap="md"),
+        dmc.Stack([heading, body], gap="md"),
         withBorder=True,
         p="lg",
         bg="dark.8",

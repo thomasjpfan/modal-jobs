@@ -117,6 +117,28 @@ def test_update_job(app, store, logs):
     assert "T4" in shown
 
 
+def test_job_view_groups_fields(store):
+    record = make_record(
+        "ap-a",
+        status="succeeded",
+        exit_code=0,
+        finished_at=2.0,
+        gpu="T4",
+        cpu=8,
+        image="python:3.12",
+        secrets=["hf-token", "wandb"],
+        labels={"team": "ml"},
+    )
+
+    shown = text(_dashboard.job_view(record, b"line 1\nline 2\n"))
+
+    assert "Resources" in shown and "Environment" in shown and "Timeline" in shown
+    assert "python:3.12" in shown and "hf-token" in shown and "wandb" in shown
+    assert "2 lines" in shown
+    # Labels and the GPU are shown in the header, not again under the details.
+    assert '"Label"' not in shown and '"GPU"' in shown and shown.count('"T4"') == 1
+
+
 def test_update_job_running_without_log(app, store):
     store.put(make_record("ap-a"))
 
