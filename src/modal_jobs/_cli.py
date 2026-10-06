@@ -395,8 +395,13 @@ def format_job(job: JobSpec) -> str:
     return "\n".join(lines)
 
 
-def job_record(job: JobSpec, app_id: str, call_id: str) -> dict:
-    """Build the record for tracking `job`, which never includes local secret values."""
+def job_record(
+    job: JobSpec, app_id: str, call_id: str, volume_ids: dict[str, str] | None = None
+) -> dict:
+    """Build the record for tracking `job`, which never includes local secret values.
+
+    `volume_ids` maps the names of the job's Modal volumes to their IDs.
+    """
     from modal_jobs._store import RECORD_VERSION, RUNNING
 
     return {
@@ -414,6 +419,7 @@ def job_record(job: JobSpec, app_id: str, call_id: str) -> dict:
         "timeout": job.timeout,
         "retries": job.retries,
         "volumes": [list(volume) for volume in job.volumes],
+        "volume_ids": dict(volume_ids or {}),
         "local_dirs": [[str(local_dir), dest] for local_dir, dest in job.local_dirs],
         "secrets": list(job.secrets),
         "local_secret_keys": [key for key, _ in job.local_secrets],
@@ -429,12 +435,14 @@ def job_record(job: JobSpec, app_id: str, call_id: str) -> dict:
     }
 
 
-def register_job(job: JobSpec, app_id: str, call_id: str) -> None:
+def register_job(
+    job: JobSpec, app_id: str, call_id: str, volume_ids: dict[str, str] | None = None
+) -> None:
     """Record `job` with the backend, warning instead of failing if that doesn't work."""
     from modal_jobs import _backend
 
     try:
-        _backend.registry().create_job.remote(job_record(job, app_id, call_id))
+        _backend.registry().create_job.remote(job_record(job, app_id, call_id, volume_ids))
     # Tracking must never stop the job from running.
     except Exception as e:  # noqa: BLE001
         console.print(
@@ -490,7 +498,9 @@ def run_job(job: JobSpec) -> str | None:
         with app.run(detach=True):
             log_path = f"{LOGS_DIR}/{app.app_id}.log"
             call = run_cmd_local.spawn(job.command, log_path, LOGS_VOLUME_NAME)
-            register_job(job, app.app_id, call.object_id)
+            # Running the app hydrated the volumes, so their IDs are known.
+            volume_ids = {name: volumes[dest].object_id for name, dest in job.volumes}
+            register_job(job, app.app_id, call.object_id, volume_ids)
             if not job.detach:
                 call.get()
                 finished = True

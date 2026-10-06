@@ -982,6 +982,15 @@ def test_build_job_name_override(tmp_path):
     assert build_job(["echo", "hi"], image="ubuntu", name="exp1").name == "exp1"
 
 
+def test_job_record_volume_ids():
+    job = build_job(["echo", "hi"], volumes=(("hf-cache", "/data"),))
+
+    assert _cli.job_record(job, "ap-1", "fc-1", {"hf-cache": "vo-1"})["volume_ids"] == {
+        "hf-cache": "vo-1"
+    }
+    assert _cli.job_record(job, "ap-1", "fc-1")["volume_ids"] == {}
+
+
 def test_job_record_name():
     job = build_job(["echo", "hi"], image="docker.io/ubuntu")
     assert _cli.job_record(job, "ap-1", "fc-1")["name"] == "ubuntu"

@@ -400,17 +400,34 @@ def timeline(record: dict):
     )
 
 
-def field_list(fields: list[tuple[str, str]]):
-    """Return a list of the `fields`, joining the values of fields with the same label."""
+def field_list(fields: list[tuple[str, str]], links: dict[str, str] | None = None):
+    """Return a list of the `fields`, joining the values of fields with the same label.
+
+    Values in `links` link to their URL there.
+    """
+    links = links or {}
     grouped: dict[str, list[str]] = {}
     for label, value in fields:
         grouped.setdefault(label, []).append(value)
+    style = {"wordBreak": "break-all"}
     return dmc.Stack(
         [
             dmc.Stack(
                 [
                     dmc.Text(label, fz=11, c="dimmed", tt="uppercase", lts="0.06em"),
-                    *(mono(value, style={"wordBreak": "break-all"}) for value in values),
+                    *(
+                        dmc.Anchor(
+                            value,
+                            href=links[value],
+                            target="_blank",
+                            ff="monospace",
+                            size="sm",
+                            style=style,
+                        )
+                        if value in links
+                        else mono(value, style=style)
+                        for value in values
+                    ),
                 ],
                 gap=4,
             )
@@ -446,6 +463,19 @@ def log_view(record: dict, log: bytes | None):
             gap="md",
         ),
     )
+
+
+def volume_links(record: dict) -> dict[str, str]:
+    """Return the URLs of the volumes of `record` on modal.com, keyed by their field value.
+
+    Jobs submitted before volume IDs were recorded have no links.
+    """
+    ids = record.get("volume_ids") or {}
+    return {
+        f"{name} -> {dest}": f"https://modal.com/id/{ids[name]}"
+        for name, dest in record.get("volumes", ())
+        if name in ids
+    }
 
 
 def job_view(record: dict, log: bytes | None, now: float | None = None):
@@ -539,7 +569,11 @@ def job_view(record: dict, log: bytes | None, now: float | None = None):
         [
             section("Timeline", timeline(record)),
             *([section("Resources", field_list(resources))] if resources else []),
-            *([section("Environment", field_list(environment))] if environment else []),
+            *(
+                [section("Environment", field_list(environment, volume_links(record)))]
+                if environment
+                else []
+            ),
         ],
         gap="md",
     )

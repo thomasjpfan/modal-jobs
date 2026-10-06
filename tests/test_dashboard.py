@@ -146,6 +146,20 @@ def test_job_view_links_to_modal():
     assert "https://modal.com/id/fc-ap-a" in shown
 
 
+def test_job_view_links_volumes():
+    record = make_record(
+        "ap-a",
+        volumes=[["hf-cache", "/data"], ["scratch", "/scratch"]],
+        volume_ids={"hf-cache": "vo-123"},
+    )
+
+    shown = text(_dashboard.job_view(record, None))
+
+    assert "https://modal.com/id/vo-123" in shown
+    # Volumes without a recorded ID are shown without a link.
+    assert "scratch -> /scratch" in shown and shown.count("https://modal.com/id/vo-") == 1
+
+
 def test_update_job_running_without_log(app, store):
     store.put(make_record("ap-a"))
 
