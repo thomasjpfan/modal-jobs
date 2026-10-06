@@ -1,3 +1,4 @@
+import functools
 import getpass
 import json
 import re
@@ -663,7 +664,7 @@ def run_and_report(job: JobSpec, name: str):
         console.print(f"[bold green]✓[/bold green] Finished running {name}")
     elif job.detach:
         console.print(
-            f"Started {name} in the background.\n\n"
+            f"Started {name} in the background as {job_link(app_id)}.\n\n"
             f"Stream logs:\n  [green]modal-jobs logs --follow {app_id}[/green]\n\n"
             f"Wait for it:\n  [green]modal-jobs wait {app_id}[/green]\n\n"
             f"Stop the job:\n  [green]modal-jobs stop {app_id}[/green]"
@@ -869,10 +870,35 @@ def format_status(status: str) -> str:
 
 def format_record(record: dict) -> str:
     """Format a job record for display, in the same style as `format_job`."""
+    formatters = {"ID": job_link, "Status": format_status}
     return "\n".join(
-        f"{label}: {format_status(value) if label == 'Status' else value}"
-        for label, value in record_fields(record)
+        f"{label}: {formatters.get(label, str)(value)}" for label, value in record_fields(record)
     )
+
+
+@functools.cache
+def dashboard_url() -> str | None:
+    """Return the URL of the deployed dashboard, or None if job IDs shouldn't link to it.
+
+    Only terminals show links, so the dashboard is looked up only when writing to one.
+    """
+    import modal.exception
+
+    from modal_jobs import _backend
+
+    if not console.is_terminal:
+        return None
+    try:
+        return _backend.dashboard_url().rstrip("/")
+    # Backends deployed before the dashboard existed don't have it.
+    except modal.exception.NotFoundError:
+        return None
+
+
+def job_link(job_id: str) -> str:
+    """Return `job_id` as console markup linking to its page on the dashboard, if any."""
+    url = dashboard_url()
+    return f"[link={url}/jobs/{job_id}]{job_id}[/link]" if url else job_id
 
 
 def get_registry():
@@ -961,7 +987,7 @@ def ls(
     for header, width in zip(headers, widths):
         table.add_column(header, no_wrap=True, overflow="ellipsis", width=width)
     for row in rows:
-        table.add_row(row[0], row[1], format_status(row[2]), *row[3:])
+        table.add_row(job_link(row[0]), row[1], format_status(row[2]), *row[3:])
     console.print(table)
 
 
@@ -1085,7 +1111,7 @@ def stop(job_ids: tuple[str, ...], yes: bool):
     running = [record for record in records if record["status"] == "running"]
     for record in records:
         if record["status"] != "running":
-            console.print(f"{record['id']} already {format_status(record['status'])}")
+            console.print(f"{job_link(record['id'])} already {format_status(record['status'])}")
     if not running:
         return
     if not yes:
@@ -1096,10 +1122,10 @@ def stop(job_ids: tuple[str, ...], yes: bool):
         record = stop_job.remote(record["id"], stopped_by)
         stop_app(record["id"])
         if record["status"] == "stopped":
-            console.print(f"[bold green]✓[/bold green] Stopped {record['id']}")
+            console.print(f"[bold green]✓[/bold green] Stopped {job_link(record['id'])}")
         else:
             # The job finished before it could be stopped.
-            console.print(f"{record['id']} already {format_status(record['status'])}")
+            console.print(f"{job_link(record['id'])} already {format_status(record['status'])}")
 
 
 def job_exit_code(record: dict) -> int:
@@ -1146,7 +1172,7 @@ def wait(job_id: str, timeout: int | None, interval: float):
             sys.exit(WAIT_TIMEOUT_EXIT_CODE)
         time.sleep(interval if deadline is None else min(interval, deadline - time.monotonic()))
         record = get_record(record["id"])
-    lines = [f"Job {record['id']} {format_status(record['status'])}"]
+    lines = [f"Job {job_link(record['id'])} {format_status(record['status'])}"]
     if record.get("exit_code") is not None:
         lines.append(f"Exit code: {format_exit_code(record)}")
     if record.get("error"):

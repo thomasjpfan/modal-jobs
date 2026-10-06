@@ -1763,3 +1763,43 @@ def test_delete_logs_skips_missing(monkeypatch):
     _backend.delete_logs(["ap-a", "ap-missing"])
 
     assert volume.files == {"ap-b.log"}
+
+
+@pytest.mark.parametrize(
+    "url, expected", [("https://dash", "[link=https://dash/jobs/ap-a]ap-a[/link]"), (None, "ap-a")]
+)
+def test_job_link(url, expected, monkeypatch):
+    monkeypatch.setattr(_cli, "dashboard_url", lambda: url)
+
+    assert _cli.job_link("ap-a") == expected
+
+
+@pytest.fixture
+def clear_dashboard_url():
+    _cli.dashboard_url.cache_clear()
+    yield
+    _cli.dashboard_url.cache_clear()
+
+
+@pytest.mark.parametrize("is_terminal, expected", [(True, "https://dash"), (False, None)])
+def test_dashboard_url(is_terminal, expected, monkeypatch, clear_dashboard_url):
+    from modal_jobs import _backend
+
+    monkeypatch.setattr(_cli.console, "_force_terminal", is_terminal)
+    monkeypatch.setattr(_backend, "dashboard_url", lambda: "https://dash/")
+
+    assert _cli.dashboard_url() == expected
+
+
+def test_dashboard_url_without_dashboard(monkeypatch, clear_dashboard_url):
+    import modal.exception
+
+    from modal_jobs import _backend
+
+    def missing_dashboard():
+        raise modal.exception.NotFoundError("missing")
+
+    monkeypatch.setattr(_cli.console, "_force_terminal", True)
+    monkeypatch.setattr(_backend, "dashboard_url", missing_dashboard)
+
+    assert _cli.dashboard_url() is None
