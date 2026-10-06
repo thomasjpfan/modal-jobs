@@ -1,7 +1,7 @@
 [project]
 name = "modal-jobs"
 version = "0.1.0"
-description = "Add your description here"
+description = "Run scripts and container commands on Modal as tracked jobs, with a CLI and a web dashboard."
 readme = "README.md"
 authors = [{ name = "Thomas J. Fan", email = "thomasjpfan@gmail.com" }]
 requires-python = ">=3.11"
