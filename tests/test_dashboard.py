@@ -61,18 +61,45 @@ def test_update_jobs_filters(app, store):
     store.put(make_record("ap-c", name="eval.py"))
     update_jobs = callback(app, "jobs-table.children")
 
-    shown = text(update_jobs(None, "all", None))
+    shown = text(update_jobs(None, "all", None, None))
     assert all(job_id in shown for job_id in ("ap-a", "ap-b", "ap-c"))
 
-    shown = text(update_jobs(None, "failed", None))
+    shown = text(update_jobs(None, "failed", None, None))
     assert "ap-b" in shown and "ap-a" not in shown
 
-    shown = text(update_jobs(None, "all", "TRAIN"))
+    shown = text(update_jobs(None, "all", "TRAIN", None))
     assert "ap-a" in shown and "ap-b" in shown and "ap-c" not in shown
 
 
+def test_update_jobs_labels(app, store):
+    store.put(make_record("ap-a", labels={"team": "ml", "exp": "1"}))
+    store.put(make_record("ap-b", labels={"team": "ml", "exp": "2"}))
+    store.put(make_record("ap-c", labels={"team": "infra"}))
+    store.put(make_record("ap-d"))
+    update_jobs = callback(app, "jobs-table.children")
+
+    shown = text(update_jobs(None, "all", None, None))
+    assert "team=ml,exp=1" in shown
+
+    def shown_ids(labels):
+        shown = text(update_jobs(None, "all", None, labels))
+        return [job_id for job_id in ("ap-a", "ap-b", "ap-c", "ap-d") if job_id in shown]
+
+    assert shown_ids("team=ml") == ["ap-a", "ap-b"]
+    assert shown_ids("team") == ["ap-a", "ap-b", "ap-c"]
+    assert shown_ids(" team=ml  exp=2 ") == ["ap-b"]
+    assert shown_ids("team=ml,exp=2") == ["ap-b"]
+    assert shown_ids("") == ["ap-a", "ap-b", "ap-c", "ap-d"]
+
+
+def test_update_jobs_invalid_label_filter(app):
+    shown = text(callback(app, "jobs-table.children")(None, "all", None, "=ml"))
+    assert "Label key must not be empty" in shown
+
+
 def test_update_jobs_empty(app):
-    assert "No jobs found." in text(callback(app, "jobs-table.children")(None, "all", None))
+    shown = text(callback(app, "jobs-table.children")(None, "all", None, None))
+    assert "No jobs found." in shown
 
 
 def test_update_job(app, store, logs):

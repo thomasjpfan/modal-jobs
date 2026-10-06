@@ -24,11 +24,13 @@ from modal_jobs._format import (
     format_bytes,
     format_duration,
     format_exit_code,
+    format_labels,
     format_memory,
     record_duration,
     record_fields,
 )
 from modal_jobs._runner import run_cmd
+from modal_jobs._store import parse_label_filter
 
 console = Console()
 
@@ -72,6 +74,8 @@ class JobSpec:
     add_python: str | None = None
     # Return right after starting the job instead of waiting for it to finish.
     detach: bool = False
+    # (key, value) pairs to find the job by with `modal-jobs ls --label`.
+    labels: tuple[tuple[str, str], ...] = ()
 
 
 # Where the logs volume is mounted in the job's container, so users can't mount anything there.
@@ -153,6 +157,15 @@ def parse_env_file(path: Path) -> list[tuple[str, str]]:
             value = value.split(" #", 1)[0].rstrip()
         pairs.append((key, value))
     return pairs
+
+
+def parse_label(value: str) -> tuple[str, str]:
+    """Parse a `KEY=VALUE` or `KEY` label spec into a `(key, value)` pair.
+
+    A bare `KEY` has an empty value, like `docker run --label`.
+    """
+    key, label_value = parse_label_filter(value)
+    return key, label_value or ""
 
 
 DURATION_RE = re.compile(r"(?:(?P<d>\d+)d)?(?:(?P<h>\d+)h)?(?:(?P<m>\d+)m)?(?:(?P<s>\d+)s)?")
@@ -281,6 +294,7 @@ def build_job(
     cpu: float | None = None,
     memory: int | None = None,
     name: str | None = None,
+    labels: tuple[tuple[str, str], ...] = (),
 ) -> JobSpec:
     """Build a JobSpec for `command`.
 
@@ -295,7 +309,8 @@ def build_job(
     If `detach` is True, the job is started without waiting for it to finish.
     `cpu` is the number of CPU cores and `memory` is the memory in MiB to request.
     `name` is the name to find the job by, which defaults to the image's name, the
-    script's filename, or the command's program.
+    script's filename, or the command's program. `labels` holds `(key, value)` pairs
+    as returned by `parse_label`, where later pairs override earlier ones with the same key.
     """
     extra = tuple(req for value in with_ for req in split_requirements(value))
     if image is None and is_script(command):
@@ -336,6 +351,7 @@ def build_job(
         image=image,
         add_python=add_python,
         detach=detach,
+        labels=tuple(dict(labels).items()),
     )
 
 
@@ -366,6 +382,8 @@ def format_job(job: JobSpec) -> str:
         lines.append(f"Retries: {job.retries}")
     if job.detach:
         lines.append("Detach: yes")
+    for key, value in job.labels:
+        lines.append(f"Label: {key}={value}")
     for name, dest in job.volumes:
         lines.append(f"Volume: {name} -> {dest}")
     for local_dir, dest in job.local_dirs:
@@ -399,6 +417,7 @@ def job_record(job: JobSpec, app_id: str, call_id: str) -> dict:
         "local_dirs": [[str(local_dir), dest] for local_dir, dest in job.local_dirs],
         "secrets": list(job.secrets),
         "local_secret_keys": [key for key, _ in job.local_secrets],
+        "labels": dict(job.labels),
         "submitted_by": f"{getpass.getuser()}@{socket.gethostname()}",
         "submitted_at": time.time(),
         "started_at": None,
@@ -510,6 +529,20 @@ def parse_env_files(ctx, param, values: tuple[Path, ...]) -> tuple[tuple[str, st
         raise click.BadParameter(str(e)) from e
 
 
+def parse_labels(ctx, param, values: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
+    try:
+        return tuple(parse_label(value) for value in values)
+    except ValueError as e:
+        raise click.BadParameter(str(e)) from e
+
+
+def parse_label_filters(ctx, param, values: tuple[str, ...]) -> dict[str, str | None]:
+    try:
+        return dict(parse_label_filter(value) for value in values)
+    except ValueError as e:
+        raise click.BadParameter(str(e)) from e
+
+
 def parse_secrets(ctx, param, values: tuple[str, ...]) -> tuple[str | tuple[str, str], ...]:
     try:
         return tuple(parse_secret(value) for value in values)
@@ -604,6 +637,16 @@ name_option = click.option(
     help="Name the job, to find it with `modal-jobs ls --name`. "
     "Defaults to the image's name or the script's filename.",
 )
+label_option = click.option(
+    "-l",
+    "--label",
+    "labels",
+    multiple=True,
+    metavar="KEY=VALUE",
+    callback=parse_labels,
+    help="Label the job, to find it with `modal-jobs ls --label`. A bare KEY has an "
+    "empty value. May be provided multiple times.",
+)
 dry_run_option = click.option(
     "--dry-run",
     is_flag=True,
@@ -653,6 +696,7 @@ def main():
 )
 @detach_option
 @name_option
+@label_option
 @dry_run_option
 def docker_run(
     image: str,
@@ -668,6 +712,7 @@ def docker_run(
     add_python: str | None,
     detach: bool,
     name: str | None,
+    labels: tuple[tuple[str, str], ...],
     dry_run: bool,
 ):
     """Run COMMAND in the registry image IMAGE on Modal, like `docker run`.
@@ -687,6 +732,7 @@ def docker_run(
         retries=retries,
         detach=detach,
         name=name,
+        labels=labels,
     )
     if dry_run:
         click.echo(format_job(job))
@@ -729,6 +775,7 @@ def uv():
 @retries_option
 @detach_option
 @name_option
+@label_option
 @dry_run_option
 def uv_run(
     command: tuple[str, ...],
@@ -743,6 +790,7 @@ def uv_run(
     retries: int,
     detach: bool,
     name: str | None,
+    labels: tuple[tuple[str, str], ...],
     dry_run: bool,
 ):
     """Run COMMAND on Modal with `uv run`.
@@ -795,6 +843,7 @@ def uv_run(
                 retries=retries,
                 detach=detach,
                 name=name,
+                labels=labels,
             )
         except (ValueError, tomllib.TOMLDecodeError) as e:
             raise click.ClickException(f"Invalid script metadata in {display_name}: {e}") from e
@@ -859,11 +908,28 @@ json_option = click.option("--json", "as_json", is_flag=True, help="Print the jo
     help="Only show jobs with this status.",
 )
 @click.option("--name", metavar="NAME", help="Only show jobs with this name.")
+@click.option(
+    "--label",
+    "labels",
+    multiple=True,
+    metavar="KEY[=VALUE]",
+    callback=parse_label_filters,
+    help="Only show jobs with the label KEY, set to VALUE if given. "
+    "May be provided multiple times to require all of them.",
+)
 @json_option
-def ls(limit: int, status: str | None, name: str | None, as_json: bool):
+def ls(
+    limit: int,
+    status: str | None,
+    name: str | None,
+    labels: dict[str, str | None],
+    as_json: bool,
+):
     """List recent jobs."""
-    # Only pass `name` when set, so `ls` works with backends deployed before it existed.
+    # Only pass filters when set, so `ls` works with backends deployed before they existed.
     filters = {"name": name} if name is not None else {}
+    if labels:
+        filters["labels"] = labels
     records = get_registry().list_jobs.remote(limit, status, **filters)
     if as_json:
         click.echo(json.dumps(records, indent=2))
@@ -881,15 +947,18 @@ def ls(limit: int, status: str | None, name: str | None, as_json: bool):
             record_duration(record, now),
             format_memory(record["peak_memory_mib"]) if record.get("peak_memory_mib") else "-",
             record.get("gpu") or "-",
+            format_labels(record),
         )
         for record in records
     ]
-    headers = ("ID", "NAME", "STATUS", "SUBMITTED", "DURATION", "MEM", "GPU")
+    headers = ("ID", "NAME", "STATUS", "SUBMITTED", "DURATION", "MEM", "GPU", "LABELS")
     widths = [max(len(header), *(len(row[i]) for row in rows)) for i, header in enumerate(headers)]
-    # Shorten only the name when space is tight, since IDs are needed in full for `show`.
+    # Shorten only the labels, then the name, when space is tight, since IDs are needed
+    # in full for `show`.
     gaps = 2 * (len(headers) - 1)
-    others = sum(widths) - widths[1]
-    widths[1] = max(min(widths[1], 40, console.width - others - gaps), len("NAME"))
+    for i in (7, 1):
+        others = sum(widths) - widths[i]
+        widths[i] = max(min(widths[i], 40, console.width - others - gaps), len(headers[i]))
     table = Table(box=None, pad_edge=False)
     for header, width in zip(headers, widths):
         table.add_column(header, no_wrap=True, overflow="ellipsis", width=width)

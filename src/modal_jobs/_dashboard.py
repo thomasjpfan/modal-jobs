@@ -4,14 +4,28 @@ The dashboard reads jobs through the `Registry`, so the registry stays the only 
 of the jobs volume and running jobs are reconciled whenever the dashboard shows them.
 """
 
+import re
 import time
 from collections.abc import Callable
 
 import dash_mantine_components as dmc
 from dash import Dash, Input, Output, dcc, html
 
-from modal_jobs._format import format_duration, format_memory, record_duration, record_fields
-from modal_jobs._store import FAILED, RUNNING, STATUSES, SUCCEEDED, TIMED_OUT
+from modal_jobs._format import (
+    format_duration,
+    format_labels,
+    format_memory,
+    record_duration,
+    record_fields,
+)
+from modal_jobs._store import (
+    FAILED,
+    RUNNING,
+    STATUSES,
+    SUCCEEDED,
+    TIMED_OUT,
+    parse_label_filter,
+)
 
 # Show at most this many jobs, newest first.
 MAX_JOBS = 200
@@ -118,7 +132,7 @@ def jobs_view(records: list[dict], now: float | None = None):
     if not records:
         return dmc.Text("No jobs found.", c="dimmed", py="xl", ta="center")
     now = time.time() if now is None else now
-    headers = ["ID", "Name", "Status", "Submitted", "Duration", "Memory", "GPU"]
+    headers = ["ID", "Name", "Status", "Submitted", "Duration", "Memory", "GPU", "Labels"]
     rows = [
         dmc.TableTr(
             [
@@ -142,6 +156,7 @@ def jobs_view(records: list[dict], now: float | None = None):
                     )
                 ),
                 dmc.TableTd(mono(record.get("gpu") or "-", c="dimmed")),
+                dmc.TableTd(mono(format_labels(record), c="dimmed", truncate="end", maw=240)),
             ]
         )
         for record in records
@@ -160,7 +175,7 @@ def jobs_view(records: list[dict], now: float | None = None):
             verticalSpacing="sm",
             horizontalSpacing="md",
         ),
-        minWidth=760,
+        minWidth=880,
     )
 
 
@@ -252,12 +267,24 @@ def jobs_page():
                         + [{"value": s, "label": s.replace("_", " ")} for s in STATUSES],
                         size="xs",
                     ),
-                    dmc.TextInput(
-                        id="name-filter",
-                        placeholder="Filter by name",
-                        size="xs",
-                        w=240,
-                        debounce=300,
+                    dmc.Group(
+                        [
+                            dmc.TextInput(
+                                id="label-filter",
+                                placeholder="Filter by label, e.g. team=ml exp",
+                                size="xs",
+                                w=240,
+                                debounce=300,
+                            ),
+                            dmc.TextInput(
+                                id="name-filter",
+                                placeholder="Filter by name",
+                                size="xs",
+                                w=240,
+                                debounce=300,
+                            ),
+                        ],
+                        gap="sm",
                     ),
                 ],
                 justify="space-between",
@@ -266,6 +293,15 @@ def jobs_page():
         ],
         gap="md",
     )
+
+
+def parse_label_filters(value: str | None) -> dict[str, str | None]:
+    """Parse the label filter box: `KEY[=VALUE]` terms separated by spaces or commas.
+
+    Raises `ValueError` if a term has an empty key.
+    """
+    terms = re.split(r"[\s,]+", (value or "").strip())
+    return dict(parse_label_filter(term) for term in terms if term)
 
 
 def create_app(get_registry: Callable, read_log: Callable[[str], bytes]) -> Dash:
@@ -320,9 +356,16 @@ def create_app(get_registry: Callable, read_log: Callable[[str], bytes]) -> Dash
         Input("refresh", "n_intervals"),
         Input("status-filter", "value"),
         Input("name-filter", "value"),
+        Input("label-filter", "value"),
     )
-    def update_jobs(_, status, name):
-        records = get_registry().list_jobs.remote(None, None if status == "all" else status)
+    def update_jobs(_, status, name, labels):
+        try:
+            labels = parse_label_filters(labels)
+        except ValueError as e:
+            return dmc.Text(str(e), c="modal-red.5", py="xl", ta="center")
+        records = get_registry().list_jobs.remote(
+            None, None if status == "all" else status, labels=labels or None
+        )
         if name:
             records = [record for record in records if name.lower() in record["name"].lower()]
         return jobs_view(records[:MAX_JOBS])

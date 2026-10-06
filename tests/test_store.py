@@ -4,7 +4,7 @@ import modal.exception
 import pytest
 from modal.call_graph import InputInfo, InputStatus
 
-from modal_jobs._store import JobStore, classify_outcome
+from modal_jobs._store import JobStore, classify_outcome, parse_label_filter
 
 
 def make_record(job_id, submitted_at, status="running"):
@@ -64,6 +64,30 @@ def test_list_name(tmp_path):
     assert [r["id"] for r in store.list(name="train.py")] == ["ap-3", "ap-1"]
     # The name filter applies before the limit.
     assert [r["id"] for r in store.list(limit=1, name="train.py")] == ["ap-3"]
+
+
+def test_list_labels(tmp_path):
+    store = JobStore(tmp_path)
+    store.put({**make_record("ap-1", 1.0), "labels": {"team": "ml", "exp": "1"}})
+    store.put({**make_record("ap-2", 2.0), "labels": {"team": "infra"}})
+    store.put({**make_record("ap-3", 3.0), "labels": {"team": "ml", "draft": ""}})
+    # Records from before labels existed have none.
+    store.put(make_record("ap-4", 4.0))
+    assert [r["id"] for r in store.list(labels={"team": "ml"})] == ["ap-3", "ap-1"]
+    assert [r["id"] for r in store.list(labels={"team": None})] == ["ap-3", "ap-2", "ap-1"]
+    assert [r["id"] for r in store.list(labels={"draft": ""})] == ["ap-3"]
+    assert [r["id"] for r in store.list(labels={"team": "ml", "exp": "1"})] == ["ap-1"]
+    # The label filter applies before the limit.
+    assert [r["id"] for r in store.list(limit=1, labels={"exp": None})] == ["ap-1"]
+
+
+def test_parse_label_filter():
+    assert parse_label_filter("team=ml") == ("team", "ml")
+    assert parse_label_filter("url=a=b") == ("url", "a=b")
+    assert parse_label_filter("team=") == ("team", "")
+    assert parse_label_filter("team") == ("team", None)
+    with pytest.raises(ValueError, match="Label key must not be empty"):
+        parse_label_filter("=ml")
 
 
 def test_get_prefix(tmp_path):

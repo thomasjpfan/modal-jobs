@@ -72,6 +72,12 @@ def format_exit_code(record: dict) -> str:
     return f"{code} (killed by {name})"
 
 
+def format_labels(record: dict) -> str:
+    """Format the labels of `record` like `team=ml,exp=3`, or `-` if it has none."""
+    labels = record.get("labels") or {}
+    return ",".join(f"{key}={value}" for key, value in labels.items()) or "-"
+
+
 def usage_fields(record: dict) -> list[tuple[str, str]]:
     """Return the resource usage and location of the job of `record` as (label, value) pairs."""
     fields = []
@@ -130,6 +136,8 @@ def record_fields(record: dict) -> list[tuple[str, str]]:
         fields.append(("Secret", name))
     for key in record.get("local_secret_keys", ()):
         fields.append(("Local secret", f"{key}=***"))
+    for key, value in (record.get("labels") or {}).items():
+        fields.append(("Label", f"{key}={value}"))
     fields += [
         ("Submitted by", record["submitted_by"]),
         ("Submitted", format_timestamp(record["submitted_at"])),

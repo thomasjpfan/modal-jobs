@@ -1014,6 +1014,60 @@ def test_run_empty_name(monkeypatch):
     assert "Name must not be empty" in result.output
 
 
+def test_parse_label():
+    assert _cli.parse_label("team=ml") == ("team", "ml")
+    assert _cli.parse_label("url=a=b") == ("url", "a=b")
+    assert _cli.parse_label("draft") == ("draft", "")
+
+
+@pytest.mark.parametrize("value", ["", "=ml", " =ml"])
+def test_parse_label_empty_key(value):
+    with pytest.raises(ValueError, match="Label key must not be empty"):
+        _cli.parse_label(value)
+
+
+def test_build_job_labels_last_wins():
+    job = build_job(["echo", "hi"], labels=(("team", "ml"), ("exp", "1"), ("team", "infra")))
+    assert job.labels == (("team", "infra"), ("exp", "1"))
+
+
+def test_format_job_labels():
+    job = build_job(["echo", "hi"], labels=(("team", "ml"), ("draft", "")))
+    assert format_job(job).endswith("\nLabel: team=ml\nLabel: draft=")
+
+
+def test_job_record_labels():
+    job = build_job(["echo", "hi"], labels=(("team", "ml"),))
+    assert _cli.job_record(job, "ap-1", "fc-1")["labels"] == {"team": "ml"}
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["run", "-l", "team=ml", "--label", "draft", "docker.io/ubuntu", "echo", "hi"],
+        ["uv", "run", "-l", "team=ml", "--label", "draft", "echo", "hi"],
+    ],
+)
+def test_run_labels(args, monkeypatch):
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(main, args)
+
+    assert result.exit_code == 0, result.output
+    assert calls[0].labels == (("team", "ml"), ("draft", ""))
+    assert calls[0].command == ["echo", "hi"]
+
+
+def test_run_empty_label_key(monkeypatch):
+    monkeypatch.setattr(_cli, "run_job", lambda job: None)
+
+    result = CliRunner().invoke(main, ["uv", "run", "--label", "=ml", "echo", "hi"])
+
+    assert result.exit_code == 2
+    assert "Label key must not be empty" in result.output
+
+
 def test_register_job_warns_on_failure(monkeypatch, capsys):
     from modal_jobs import _backend
 
@@ -1037,7 +1091,7 @@ class FakeRegistry:
 
     def __init__(self, store):
         self.list_jobs = FakeMethod(
-            lambda limit, status, name=None: store.list(limit, status, name)
+            lambda limit, status, name=None, labels=None: store.list(limit, status, name, labels)
         )
         self.get_job = FakeMethod(store.get)
         self.stop_job = FakeMethod(lambda job_id, stopped_by: fake_stop_job(store, job_id))
@@ -1133,6 +1187,45 @@ def test_ls_name(store):
     assert "ap-train " in result.output
     assert "ap-eval" not in result.output
     assert "ap-train2" not in result.output
+
+
+def test_ls_label(store):
+    store.put(make_record("ap-ml1", labels={"team": "ml", "exp": "1"}))
+    store.put(make_record("ap-ml2", labels={"team": "ml", "exp": "2"}))
+    store.put(make_record("ap-infra", labels={"team": "infra"}))
+    store.put(make_record("ap-unlabeled"))
+
+    def ls_ids(*args):
+        result = CliRunner().invoke(main, ["ls", "--json", *args])
+        assert result.exit_code == 0, result.output
+        return sorted(record["id"] for record in json.loads(result.output))
+
+    assert ls_ids("--label", "team=ml") == ["ap-ml1", "ap-ml2"]
+    assert ls_ids("--label", "exp") == ["ap-ml1", "ap-ml2"]
+    assert ls_ids("--label", "team=ml", "--label", "exp=2") == ["ap-ml2"]
+    assert ls_ids("--label", "team=other") == []
+
+
+def test_ls_labels_column(store):
+    store.put(make_record("ap-labeled", labels={"team": "ml", "exp": "3"}))
+    store.put(make_record("ap-unlabeled", submitted_at=1.0))
+
+    result = CliRunner().invoke(main, ["ls"])
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert "LABELS" in lines[0]
+    assert "ap-labeled" in lines[1] and lines[1].rstrip().endswith("team=ml,exp=3")
+    assert "ap-unlabeled" in lines[2] and lines[2].rstrip().endswith("-")
+
+
+def test_show_labels(store):
+    store.put(make_record("ap-abc", labels={"team": "ml"}))
+
+    result = CliRunner().invoke(main, ["show", "ap-abc"])
+
+    assert result.exit_code == 0, result.output
+    assert "Label: team=ml" in result.output
 
 
 def test_ls_empty(store):

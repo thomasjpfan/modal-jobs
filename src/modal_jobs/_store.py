@@ -76,14 +76,23 @@ class JobStore:
         return self._read(matches[0])
 
     def list(
-        self, limit: int | None = None, status: str | None = None, name: str | None = None
+        self,
+        limit: int | None = None,
+        status: str | None = None,
+        name: str | None = None,
+        labels: dict[str, str | None] | None = None,
     ) -> list[dict]:
-        """Return records newest first, optionally only those with `status` and `name`."""
+        """Return records newest first, optionally only those with `status`, `name`, and `labels`.
+
+        A record matches `labels` if it has every key, with the given value unless it is None.
+        """
         records = [self._read(job_id) for job_id in self._ids()]
         if status is not None:
             records = [record for record in records if record["status"] == status]
         if name is not None:
             records = [record for record in records if record["name"] == name]
+        if labels:
+            records = [record for record in records if has_labels(record, labels)]
         records.sort(key=lambda record: record["submitted_at"], reverse=True)
         return records[:limit] if limit is not None else records
 
@@ -93,6 +102,26 @@ class JobStore:
     def delete(self, job_id: str) -> None:
         """Delete the record with ID `job_id`, if any."""
         self._path(job_id).unlink(missing_ok=True)
+
+
+def parse_label_filter(value: str) -> tuple[str, str | None]:
+    """Parse a `KEY=VALUE` or `KEY` label filter into a `(key, value)` pair.
+
+    A bare `KEY` matches any value, so its value is None.
+    """
+    key, sep, label_value = value.partition("=")
+    if not key.strip():
+        raise ValueError(f"Label key must not be empty, got {value!r}")
+    return key, label_value if sep else None
+
+
+def has_labels(record: dict, labels: dict[str, str | None]) -> bool:
+    """Return True if `record` has every label in `labels`, with its value unless that is None."""
+    record_labels = record.get("labels") or {}
+    return all(
+        key in record_labels and (value is None or record_labels[key] == value)
+        for key, value in labels.items()
+    )
 
 
 def classify_outcome(call) -> dict:
