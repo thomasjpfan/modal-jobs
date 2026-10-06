@@ -10,7 +10,7 @@ list, inspect, stream, wait on, stop, and clean up jobs from the command line or
 dashboard.
 
 ```console
-$ modal-jobs uv run --gpu A100-80GB -v checkpoints:/ckpt -d -l team=ml -l exp=r8 finetune.py --epochs 3
+$ modal-jobs uv run --gpu A100 -v checkpoints:/ckpt -d -l team=ml -l exp=r8 finetune.py --epochs 3
 Started finetune.py in the background.
 
 Stream logs:
@@ -145,11 +145,11 @@ Job IDs can be shortened to any unique prefix, like `ap-Hc7p`.
 
 ```console
 $ modal-jobs ls
-ID                   NAME                STATUS     SUBMITTED  DURATION  GPU        LABELS
-ap-Tq4mZ8wK2nR7vXb1  finetune.py         running    21m0s ago  21m0s     A100-80GB  team=ml,exp=r16
-ap-Hc7pL2sV9dY4gNe6  finetune.py         succeeded  1h30m ago  59m48s    A100-80GB  team=ml,exp=r8
-ap-Ws3bF6jQ1kU8mAa9  preprocess.py       failed     2h30m ago  47s       -          team=data
-ap-Dn9rE5tH3xC2pLo4  eval.py             succeeded  4h0m ago   12m14s    L4         team=ml,exp=r8
+ID                   NAME                STATUS     SUBMITTED  DURATION  GPU   LABELS
+ap-Tq4mZ8wK2nR7vXb1  finetune.py         running    21m0s ago  21m0s     A100  team=ml,exp=r16
+ap-Hc7pL2sV9dY4gNe6  finetune.py         succeeded  1h30m ago  59m48s    A100  team=ml,exp=r8
+ap-Ws3bF6jQ1kU8mAa9  preprocess.py       failed     2h30m ago  47s       -     team=data
+ap-Dn9rE5tH3xC2pLo4  eval.py             succeeded  4h0m ago   12m14s    L4    team=ml,exp=r8
 ap-Ka1vM7yB4sJ6qWz3  sweep.py            timed_out  1d1h ago   1h0m      H100       team=ml,sweep=lr
 ap-Pe8gX2cN5rT1hVu7  ubuntu              succeeded  2d0h ago   2s        -          -
 ap-Zm6uR3aW8fK9tDs2  notebook_export.py  stopped    3d0h ago   5m12s     -          -
@@ -175,7 +175,7 @@ Status: succeeded
 Exit code: 0
 CPU time: 4h59m (5.0 cores on average of 8)
 Command: uv run /root/finetune.py --epochs 3 --lr 3e-5
-GPU: A100-80GB
+GPU: A100
 Volume: checkpoints -> /ckpt
 Label: team=ml
 Duration: 59m48s
