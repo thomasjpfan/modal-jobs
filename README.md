@@ -10,7 +10,7 @@ list, inspect, stream, wait on, stop, and clean up jobs from the command line or
 dashboard.
 
 ```console
-$ modal-jobs uv run --gpu A100-80GB -d -l team=ml -l exp=r8 finetune.py --epochs 3
+$ modal-jobs uv run --gpu A100-80GB -v checkpoints:/ckpt -d -l team=ml -l exp=r8 finetune.py --epochs 3
 Started finetune.py in the background.
 
 Stream logs:
