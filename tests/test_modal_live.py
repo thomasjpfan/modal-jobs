@@ -233,7 +233,6 @@ def test_tracking_succeeded(tracking_backend):
     assert record["status"] == "succeeded"
     assert record["exit_code"] == 0
     assert record["started_at"] <= record["finished_at"]
-    assert record["peak_memory_mib"] > 0
     assert record["cpu_seconds"] >= 0
     assert record["task_id"].startswith("ta-")
     assert record["region"]

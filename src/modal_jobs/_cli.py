@@ -25,7 +25,6 @@ from modal_jobs._format import (
     format_duration,
     format_exit_code,
     format_labels,
-    format_memory,
     record_duration,
     record_fields,
 )
@@ -945,18 +944,17 @@ def ls(
             record["status"],
             f"{format_duration(now - record['submitted_at'])} ago",
             record_duration(record, now),
-            format_memory(record["peak_memory_mib"]) if record.get("peak_memory_mib") else "-",
             record.get("gpu") or "-",
             format_labels(record),
         )
         for record in records
     ]
-    headers = ("ID", "NAME", "STATUS", "SUBMITTED", "DURATION", "MEM", "GPU", "LABELS")
+    headers = ("ID", "NAME", "STATUS", "SUBMITTED", "DURATION", "GPU", "LABELS")
     widths = [max(len(header), *(len(row[i]) for row in rows)) for i, header in enumerate(headers)]
     # Shorten only the labels, then the name, when space is tight, since IDs are needed
     # in full for `show`.
     gaps = 2 * (len(headers) - 1)
-    for i in (7, 1):
+    for i in (6, 1):
         others = sum(widths) - widths[i]
         widths[i] = max(min(widths[i], 40, console.width - others - gaps), len(headers[i]))
     table = Table(box=None, pad_edge=False)

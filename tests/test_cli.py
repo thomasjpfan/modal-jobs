@@ -1307,14 +1307,11 @@ def test_usage_fields():
         finished_at=100.0,
         cpu_seconds=150.0,
         cpu=4,
-        peak_memory_mib=3072.0,
-        memory=4096,
         task_id="ta-1",
         region="us-west",
         cloud="aws",
     )
     assert _format.usage_fields(record) == [
-        ("Peak memory", "3.0G (75% of 4.0G requested)"),
         ("CPU time", "2m30s (1.5 cores on average of 4)"),
         ("Container", "ta-1 (us-west, aws)"),
     ]
@@ -1322,16 +1319,6 @@ def test_usage_fields():
 
 def test_usage_fields_without_stats():
     assert _format.usage_fields(make_record("ap-1")) == []
-
-
-def test_ls_peak_memory(store):
-    store.put(make_record("ap-1", status="succeeded", peak_memory_mib=512.0))
-
-    result = CliRunner().invoke(main, ["ls"])
-
-    assert result.exit_code == 0, result.output
-    assert "MEM" in result.output.splitlines()[0]
-    assert "512M" in result.output.splitlines()[1]
 
 
 def test_parse_volume_logs_dir_reserved():

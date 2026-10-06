@@ -14,7 +14,6 @@ from dash import Dash, Input, Output, dcc, html
 from modal_jobs._format import (
     format_duration,
     format_labels,
-    format_memory,
     record_duration,
     record_fields,
 )
@@ -132,7 +131,7 @@ def jobs_view(records: list[dict], now: float | None = None):
     if not records:
         return dmc.Text("No jobs found.", c="dimmed", py="xl", ta="center")
     now = time.time() if now is None else now
-    headers = ["ID", "Name", "Status", "Submitted", "Duration", "Memory", "GPU", "Labels"]
+    headers = ["ID", "Name", "Status", "Submitted", "Duration", "GPU", "Labels"]
     rows = [
         dmc.TableTr(
             [
@@ -147,14 +146,6 @@ def jobs_view(records: list[dict], now: float | None = None):
                     mono(f"{format_duration(now - record['submitted_at'])} ago", c="dimmed")
                 ),
                 dmc.TableTd(mono(record_duration(record, now), c="dimmed")),
-                dmc.TableTd(
-                    mono(
-                        format_memory(record["peak_memory_mib"])
-                        if record.get("peak_memory_mib")
-                        else "-",
-                        c="dimmed",
-                    )
-                ),
                 dmc.TableTd(mono(record.get("gpu") or "-", c="dimmed")),
                 dmc.TableTd(mono(format_labels(record), c="dimmed", truncate="end", maw=240)),
             ]

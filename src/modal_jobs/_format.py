@@ -65,8 +65,7 @@ def format_exit_code(record: dict) -> str:
         name = signal.Signals(-code).name
     except ValueError:
         return f"{code} (killed by signal {-code})"
-    # The kernel's out-of-memory killer sends SIGKILL. `--memory` is only a request,
-    # so peak memory can't confirm it.
+    # The kernel's out-of-memory killer sends SIGKILL, but so can other things.
     if name == "SIGKILL":
         return f"{code} (killed by {name}, possibly out of memory)"
     return f"{code} (killed by {name})"
@@ -81,14 +80,6 @@ def format_labels(record: dict) -> str:
 def usage_fields(record: dict) -> list[tuple[str, str]]:
     """Return the resource usage and location of the job of `record` as (label, value) pairs."""
     fields = []
-    peak = record.get("peak_memory_mib")
-    if peak is not None:
-        value = format_memory(peak)
-        if record.get("memory"):
-            value += (
-                f" ({peak / record['memory']:.0%} of {format_memory(record['memory'])} requested)"
-            )
-        fields.append(("Peak memory", value))
     cpu_seconds = record.get("cpu_seconds")
     if cpu_seconds is not None:
         value = format_duration(cpu_seconds)
