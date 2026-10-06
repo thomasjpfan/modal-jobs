@@ -2,7 +2,6 @@ import getpass
 import json
 import re
 import shlex
-import signal
 import socket
 import subprocess
 import sys
@@ -21,6 +20,14 @@ import click
 from rich.console import Console
 from rich.table import Table
 
+from modal_jobs._format import (
+    format_bytes,
+    format_duration,
+    format_exit_code,
+    format_memory,
+    record_duration,
+    record_fields,
+)
 from modal_jobs._runner import run_cmd
 
 console = Console()
@@ -807,148 +814,17 @@ STATUS_STYLES = {
 }
 
 
-def format_duration(seconds: float) -> str:
-    """Format `seconds` like `45s`, `3m12s`, `2h5m`, or `1d3h`."""
-    seconds = int(seconds)
-    days, seconds = divmod(seconds, 86400)
-    hours, seconds = divmod(seconds, 3600)
-    minutes, seconds = divmod(seconds, 60)
-    if days:
-        return f"{days}d{hours}h"
-    if hours:
-        return f"{hours}h{minutes}m"
-    if minutes:
-        return f"{minutes}m{seconds}s"
-    return f"{seconds}s"
-
-
-def record_duration(record: dict, now: float | None = None) -> str:
-    """Return how long the job of `record` ran, or has been running, or `-` if unknown."""
-    started_at = record.get("started_at")
-    if record["status"] == "running":
-        # The start time is only known once the job finishes, so count from submission.
-        started_at = record["submitted_at"]
-        finished_at = time.time() if now is None else now
-    else:
-        finished_at = record.get("finished_at")
-    if started_at is None or finished_at is None:
-        return "-"
-    return format_duration(max(finished_at - started_at, 0))
-
-
 def format_status(status: str) -> str:
     style = STATUS_STYLES.get(status, "")
     return f"[{style}]{status}[/{style}]" if style else status
 
 
-def format_timestamp(timestamp: float | None) -> str:
-    if timestamp is None:
-        return "-"
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
-
-
-def format_memory(mebibytes: float) -> str:
-    """Format a memory size in MiB like `512M` or `3.9G`."""
-    if mebibytes < 1024:
-        return f"{mebibytes:.0f}M"
-    return f"{mebibytes / 1024:.1f}G"
-
-
-def format_bytes(size: int) -> str:
-    """Format a size in bytes like `512B`, `3K`, `512M`, or `3.9G`."""
-    if size < 1024:
-        return f"{size}B"
-    if size < 1024 * 1024:
-        return f"{size / 1024:.0f}K"
-    return format_memory(size / (1024 * 1024))
-
-
-def format_exit_code(record: dict) -> str:
-    """Format the exit code of `record`, naming the signal that killed the job, if any."""
-    code = record["exit_code"]
-    if code >= 0:
-        return str(code)
-    try:
-        name = signal.Signals(-code).name
-    except ValueError:
-        return f"{code} (killed by signal {-code})"
-    # The kernel's out-of-memory killer sends SIGKILL. `--memory` is only a request,
-    # so peak memory can't confirm it.
-    if name == "SIGKILL":
-        return f"{code} (killed by {name}, possibly out of memory)"
-    return f"{code} (killed by {name})"
-
-
-def format_usage(record: dict) -> list[str]:
-    """Format the resource usage and location of the job of `record`."""
-    lines = []
-    peak = record.get("peak_memory_mib")
-    if peak is not None:
-        line = f"Peak memory: {format_memory(peak)}"
-        if record.get("memory"):
-            line += (
-                f" ({peak / record['memory']:.0%} of {format_memory(record['memory'])} requested)"
-            )
-        lines.append(line)
-    cpu_seconds = record.get("cpu_seconds")
-    if cpu_seconds is not None:
-        line = f"CPU time: {format_duration(cpu_seconds)}"
-        wall = (record.get("finished_at") or 0) - (record.get("started_at") or 0)
-        if wall > 0:
-            line += f" ({cpu_seconds / wall:.1f} cores on average"
-            line += f" of {record['cpu']:g})" if record.get("cpu") else ")"
-        lines.append(line)
-    if record.get("task_id"):
-        where = ", ".join(value for value in (record.get("region"), record.get("cloud")) if value)
-        lines.append(f"Container: {record['task_id']}" + (f" ({where})" if where else ""))
-    return lines
-
-
 def format_record(record: dict) -> str:
     """Format a job record for display, in the same style as `format_job`."""
-    lines = [
-        f"ID: {record['id']}",
-        f"Name: {record['name']}",
-        f"Status: {format_status(record['status'])}",
-    ]
-    if record.get("exit_code") is not None:
-        lines.append(f"Exit code: {format_exit_code(record)}")
-    if record.get("error"):
-        lines.append(f"Error: {record['error']}")
-    lines += format_usage(record)
-    lines.append(f"Command: {shlex.join(record['command'])}")
-    if record.get("image"):
-        lines.append(f"Image: {record['image']}")
-    if record.get("add_python"):
-        lines.append(f"Add Python: {record['add_python']}")
-    if record.get("dependencies"):
-        lines.append(f"Dependencies: {', '.join(record['dependencies'])}")
-    if record.get("gpu"):
-        lines.append(f"GPU: {record['gpu']}")
-    if record.get("cpu") is not None:
-        lines.append(f"CPU: {record['cpu']:g}")
-    if record.get("memory") is not None:
-        lines.append(f"Memory: {record['memory']} MiB")
-    if record.get("timeout") is not None:
-        lines.append(f"Timeout: {record['timeout']}s")
-    if record.get("retries"):
-        lines.append(f"Retries: {record['retries']}")
-    for name, dest in record.get("volumes", ()):
-        lines.append(f"Volume: {name} -> {dest}")
-    for local_dir, dest in record.get("local_dirs", ()):
-        lines.append(f"Local directory: {local_dir} -> {dest}")
-    for name in record.get("secrets", ()):
-        lines.append(f"Secret: {name}")
-    for key in record.get("local_secret_keys", ()):
-        lines.append(f"Local secret: {key}=***")
-    lines += [
-        f"Submitted by: {record['submitted_by']}",
-        f"Submitted: {format_timestamp(record['submitted_at'])}",
-        f"Started: {format_timestamp(record.get('started_at'))}",
-        f"Finished: {format_timestamp(record.get('finished_at'))}",
-        f"Duration: {record_duration(record)}",
-    ]
-    return "\n".join(lines)
+    return "\n".join(
+        f"{label}: {format_status(value) if label == 'Status' else value}"
+        for label, value in record_fields(record)
+    )
 
 
 def get_registry():
@@ -1307,11 +1183,14 @@ def backend_deploy():
     with modal.enable_output():
         _backend.app.deploy()
     console.print(f"[bold green]✓[/bold green] Deployed the {_backend.APP_NAME} backend")
+    console.print(f"Dashboard: {_backend.dashboard_url()}", highlight=False)
 
 
 @backend.command("status")
 def backend_status():
     """Show whether the backend is deployed, and how many jobs and logs it holds."""
+    import modal.exception
+
     from modal_jobs import _backend
 
     records = get_registry().list_jobs.remote(None, None)
@@ -1325,4 +1204,9 @@ def backend_status():
         f"Jobs: {len(records)}" + (f" ({by_status})" if by_status else ""),
         f"Saved logs: {log_count} files, {format_bytes(log_bytes)}",
     ]
+    try:
+        lines.append(f"Dashboard: {_backend.dashboard_url()}")
+    # Backends deployed before the dashboard existed don't have it.
+    except modal.exception.NotFoundError:
+        lines.append("Dashboard: [dim]not deployed, update with `modal-jobs backend deploy`[/dim]")
     console.print("\n".join(lines), highlight=False)

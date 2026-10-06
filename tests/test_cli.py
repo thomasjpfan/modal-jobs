@@ -5,7 +5,7 @@ import urllib.error
 import pytest
 from click.testing import CliRunner
 
-from modal_jobs import _cli
+from modal_jobs import _cli, _format
 from modal_jobs._cli import (
     JobSpec,
     build_job,
@@ -1203,10 +1203,10 @@ def test_format_duration(seconds, expected):
     ],
 )
 def test_format_exit_code(fields, expected):
-    assert _cli.format_exit_code(fields) == expected
+    assert _format.format_exit_code(fields) == expected
 
 
-def test_format_usage():
+def test_usage_fields():
     record = make_record(
         "ap-1",
         status="succeeded",
@@ -1220,15 +1220,15 @@ def test_format_usage():
         region="us-west",
         cloud="aws",
     )
-    assert _cli.format_usage(record) == [
-        "Peak memory: 3.0G (75% of 4.0G requested)",
-        "CPU time: 2m30s (1.5 cores on average of 4)",
-        "Container: ta-1 (us-west, aws)",
+    assert _format.usage_fields(record) == [
+        ("Peak memory", "3.0G (75% of 4.0G requested)"),
+        ("CPU time", "2m30s (1.5 cores on average of 4)"),
+        ("Container", "ta-1 (us-west, aws)"),
     ]
 
 
-def test_format_usage_without_stats():
-    assert _cli.format_usage(make_record("ap-1")) == []
+def test_usage_fields_without_stats():
+    assert _format.usage_fields(make_record("ap-1")) == []
 
 
 def test_ls_peak_memory(store):
@@ -1602,6 +1602,9 @@ def test_backend_status(store, monkeypatch):
     from modal_jobs import _backend
 
     monkeypatch.setattr(_backend, "logs_usage", lambda: (3, 3 * 1024 * 1024))
+    monkeypatch.setattr(
+        _backend, "dashboard_url", lambda: "https://me--modal-jobs-dashboard.modal.run"
+    )
     store.put(make_record("ap-a"))
     store.put(make_record("ap-b", status="succeeded"))
     store.put(make_record("ap-c", status="succeeded"))
@@ -1612,6 +1615,24 @@ def test_backend_status(store, monkeypatch):
     assert "Backend: deployed" in result.output
     assert "Jobs: 3 (1 running, 2 succeeded)" in result.output
     assert "Saved logs: 3 files, 3M" in result.output
+    assert "Dashboard: https://me--modal-jobs-dashboard.modal.run" in result.output
+
+
+def test_backend_status_without_dashboard(store, monkeypatch):
+    import modal.exception
+
+    from modal_jobs import _backend
+
+    def missing_dashboard():
+        raise modal.exception.NotFoundError("missing")
+
+    monkeypatch.setattr(_backend, "logs_usage", lambda: (0, 0))
+    monkeypatch.setattr(_backend, "dashboard_url", missing_dashboard)
+
+    result = CliRunner().invoke(main, ["backend", "status"])
+
+    assert result.exit_code == 0, result.output
+    assert "Dashboard: not deployed" in result.output
 
 
 @pytest.mark.parametrize(
