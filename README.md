@@ -22,25 +22,12 @@ Stop the job:
 
 ## Features
 
-- **Run Python scripts with `uv run`.** Uploads a local script, a URL, or a script from
-  stdin, and installs the script's
-  [inline dependencies](https://packaging.python.org/en/latest/specifications/inline-script-metadata/)
-  and any `--with` packages.
-- **Run commands in any container image**, like `docker run`, with `--add-python` for
-  images that don't have Python.
-- **Pick resources:** GPUs (`T4`, `A100-80GB`, `H100:8`, and more), CPU cores, memory, a
-  timeout, and retries.
-- **Mount data and secrets:** Modal volumes or local directories with `-v`, and Modal secrets,
-  `KEY=VALUE` pairs, or `.env` files with `-s` and `--env-file`.
-- **Wait or detach:** stay attached until the job finishes, or detach with `-d` and come
-  back later with `logs --follow` or `wait`.
 - **Tracked history:** every job is recorded with its status, exit code, timestamps,
   resources, and CPU usage, and its output is saved to a Modal volume.
-- **Names and labels** (`--name`, `-l team=ml`), for filtering in `ls` and the dashboard.
+- **Detach and come back:** start a job with `-d`, then use `logs --follow` or `wait`.
 - **Scripting friendly:** `wait` exits with the job's exit code, and `ls` and `show` can
   print JSON.
-- **A read-only web dashboard** that is deployed with the backend and refreshes itself
-  every 10 seconds.
+- **A read-only web dashboard**, deployed with the backend.
 
 ## Installation
 
@@ -69,7 +56,8 @@ Run `modal-jobs backend deploy` again after upgrading modal-jobs to update the b
 ### Python scripts with `uv run`
 
 `modal-jobs uv run` runs a command on Modal with `uv run`. If the command starts with a
-Python script, the script is uploaded and run with its inline dependencies:
+Python script, the script is uploaded and run with its
+[inline dependencies](https://packaging.python.org/en/latest/specifications/inline-script-metadata/):
 
 ```python
 # /// script
@@ -132,9 +120,6 @@ modal-jobs run --gpu H100 nvcr.io/nvidia/pytorch:24.05-py3 python train.py
 ```bash
 # Mount a Modal volume and a local directory, and add secrets.
 modal-jobs uv run -v checkpoints:/ckpt -v ./data:/data -s hf-token -s WANDB_MODE=offline train.py
-
-# Use a .env file.
-modal-jobs uv run --env-file .env examples/04_secret.py
 ```
 
 ## Managing jobs
@@ -174,23 +159,10 @@ Name: finetune.py
 Status: succeeded
 Exit code: 0
 CPU time: 4h59m (5.0 cores on average of 8)
-Container: ta-01JA3K9QXW2M (us-east-1, aws)
 Command: uv run /root/finetune.py --epochs 3 --lr 3e-5
-Dependencies: torch>=2.4, transformers, peft, datasets
 GPU: A100-80GB
-CPU: 8
-Memory: 32768 MiB
-Timeout: 14400s
-Retries: 1
 Volume: checkpoints -> /ckpt
-Secret: hf-token
-Secret: wandb
 Label: team=ml
-Label: exp=r8
-Submitted by: thomas@laptop
-Submitted: 2026-10-06 11:39:13
-Started: 2026-10-06 11:39:19
-Finished: 2026-10-06 12:39:07
 Duration: 59m48s
 ```
 
