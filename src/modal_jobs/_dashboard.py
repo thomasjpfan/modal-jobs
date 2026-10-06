@@ -260,12 +260,15 @@ def jobs_page():
         [
             dmc.Group(
                 [
-                    dmc.SegmentedControl(
+                    dmc.Select(
                         id="status-filter",
                         value="all",
-                        data=[{"value": "all", "label": "all"}]
+                        data=[{"value": "all", "label": "all statuses"}]
                         + [{"value": s, "label": s.replace("_", " ")} for s in STATUSES],
+                        # Keep a status selected, so the filter is never empty.
+                        allowDeselect=False,
                         size="xs",
+                        w=160,
                     ),
                     dmc.Group(
                         [
