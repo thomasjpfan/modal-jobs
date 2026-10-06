@@ -150,11 +150,6 @@ body {
   backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--mantine-color-dark-5);
 }
-.mj-logo {
-  width: 22px; height: 22px; border-radius: 6px;
-  background: linear-gradient(135deg, #7fee64, #28c700);
-  box-shadow: 0 0 18px rgba(127, 238, 100, 0.35);
-}
 .mj-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; }
 .mj-pulse { animation: mj-pulse 1.8s ease-out infinite; }
 @keyframes mj-pulse {
@@ -174,17 +169,28 @@ body {
 }
 """
 
-# The logo's icon, as an SVG that follows the browser's color scheme.
-FAVICON_SVG = (
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80">'
-    "<style>.t{fill:#f6f8fa;stroke:#d0d7de}.f{fill:#1f2328}"
-    "@media (prefers-color-scheme:dark){.t{fill:#181818;stroke:#3b3b3b}.f{fill:#e6edf3}}</style>"
-    '<rect class="t" x="1" y="1" width="78" height="78" rx="16" stroke-width="2"/>'
-    '<circle cx="17" cy="22" r="5" fill="#4fbf2e"/><rect class="f" x="28" y="19" width="44" height="6" rx="3"/>'
-    '<circle cx="17" cy="40" r="5" fill="#d176bd"/><rect class="f" x="28" y="37" width="32" height="6" rx="3"/>'
-    '<circle cx="17" cy="58" r="5" fill="#dc3636"/><rect class="f" x="28" y="55" width="38" height="6" rx="3"/>'
-    "</svg>"
+
+# The logo's icon, a tile of job rows with status dots, as an SVG styled by `css`.
+def icon_svg(css: str) -> str:
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80">'
+        f"<style>{css}</style>"
+        '<rect class="t" x="1" y="1" width="78" height="78" rx="16" stroke-width="2"/>'
+        '<circle cx="17" cy="22" r="5" fill="#4fbf2e"/><rect class="f" x="28" y="19" width="44" height="6" rx="3"/>'
+        '<circle cx="17" cy="40" r="5" fill="#d176bd"/><rect class="f" x="28" y="37" width="32" height="6" rx="3"/>'
+        '<circle cx="17" cy="58" r="5" fill="#dc3636"/><rect class="f" x="28" y="55" width="38" height="6" rx="3"/>'
+        "</svg>"
+    )
+
+
+DARK_ICON_CSS = ".t{fill:#181818;stroke:#3b3b3b}.f{fill:#e6edf3}"
+# The favicon follows the browser's color scheme.
+FAVICON_SVG = icon_svg(
+    ".t{fill:#f6f8fa;stroke:#d0d7de}.f{fill:#1f2328}"
+    f"@media (prefers-color-scheme:dark){{{DARK_ICON_CSS}}}"
 )
+# The header is always dark.
+HEADER_ICON_SVG = icon_svg(DARK_ICON_CSS)
 FAVICON = f'<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,{quote(FAVICON_SVG)}">'
 
 INDEX_STRING = f"""<!DOCTYPE html>
@@ -715,7 +721,12 @@ def create_app(get_registry: Callable, read_log: Callable[[str], bytes]) -> Dash
                             dmc.Anchor(
                                 dmc.Group(
                                     [
-                                        html.Div(className="mj-logo"),
+                                        html.Img(
+                                            src=f"data:image/svg+xml,{quote(HEADER_ICON_SVG)}",
+                                            width=26,
+                                            height=26,
+                                            alt="",
+                                        ),
                                         dmc.Text("modal-jobs", ff="monospace", fw=500, c="dark.0"),
                                     ],
                                     gap=10,
