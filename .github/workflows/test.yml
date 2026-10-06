@@ -15,10 +15,14 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.14"]
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
+          python-version: ${{ matrix.python-version }}
       - name: Check formatting, lint, and run the tests
         run: uv run --locked poe check

@@ -4,6 +4,7 @@ A record is written when the job starts, with status `running`, and once more wh
 the job reaches a terminal status, after which it never changes.
 """
 
+import builtins
 import json
 import os
 import subprocess
@@ -96,7 +97,7 @@ class JobStore:
         records.sort(key=lambda record: record["submitted_at"], reverse=True)
         return records[:limit] if limit is not None else records
 
-    def running(self) -> list[dict]:
+    def running(self) -> builtins.list[dict]:
         return self.list(status=RUNNING)
 
     def delete(self, job_id: str) -> None:
