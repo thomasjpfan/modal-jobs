@@ -282,6 +282,144 @@ def fetch_script(url: str) -> str:
         return response.read().decode("utf-8")
 
 
+CONFIG_FILENAME = ".modal-jobs.toml"
+
+
+@dataclass(frozen=True)
+class Config:
+    """Project defaults for `run` and `uv run`, with fields named like `build_job`'s arguments."""
+
+    # The file the defaults were read from, or None if there is none.
+    path: Path | None = None
+    with_: tuple[str, ...] = ()
+    volumes: tuple[tuple[str | Path, str], ...] = ()
+    # Modal secret names and `(key, value)` pairs, starting with those from `env-files`.
+    secrets: tuple[str | tuple[str, str], ...] = ()
+    gpu: str | None = None
+    cpu: float | None = None
+    memory: int | None = None
+    timeout: int | None = None
+    retries: int = 0
+    add_python: str | None = None
+    labels: tuple[tuple[str, str], ...] = ()
+
+
+def find_config(start: Path) -> tuple[Path, dict] | None:
+    """Find the nearest project config in `start` or its parents.
+
+    Returns the config's path and its table, from a `.modal-jobs.toml` file or the
+    `[tool.modal-jobs]` table of a `pyproject.toml`. A `.modal-jobs.toml` takes precedence
+    over a `pyproject.toml` in the same directory, and a `pyproject.toml` without the table
+    is skipped.
+    """
+    for directory in (start, *start.parents):
+        path = directory / CONFIG_FILENAME
+        if path.is_file():
+            return path, read_toml(path)
+        path = directory / "pyproject.toml"
+        if path.is_file():
+            table = read_toml(path).get("tool", {}).get("modal-jobs")
+            if table is not None:
+                return path, table
+    return None
+
+
+def read_toml(path: Path) -> dict:
+    try:
+        with path.open("rb") as f:
+            return tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"{path}: {e}") from e
+
+
+def is_str_list(value) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def parse_config(table: dict, path: Path) -> Config:
+    """Parse the defaults in a config `table` read from `path`.
+
+    Values are written like the command line options. Relative local directories and
+    `.env` files are relative to the directory of `path`.
+    """
+    config = {}
+    env_files = ()
+    for key, value in table.items():
+        try:
+            if key in ("volumes", "secrets", "env-files", "with"):
+                if not is_str_list(value):
+                    raise ValueError("Expected a list of strings")
+                if key == "volumes":
+                    config["volumes"] = tuple(parse_volume(v, cwd=path.parent) for v in value)
+                elif key == "secrets":
+                    config["secrets"] = tuple(parse_secret(v) for v in value)
+                elif key == "env-files":
+                    env_files = tuple(
+                        pair for v in value for pair in parse_env_file(path.parent / v)
+                    )
+                else:
+                    config["with_"] = tuple(req for v in value for req in split_requirements(v))
+            elif key in ("gpu", "add-python"):
+                if not isinstance(value, str):
+                    raise ValueError("Expected a string")
+                config[key.replace("-", "_")] = value
+            elif key == "cpu":
+                if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+                    raise ValueError(f"Expected a positive number, got {value!r}")
+                config["cpu"] = float(value)
+            elif key in ("memory", "timeout"):
+                if isinstance(value, bool) or not isinstance(value, int | str):
+                    raise ValueError("Expected a string or an integer")
+                parse = parse_memory if key == "memory" else parse_duration
+                config[key] = parse(str(value))
+            elif key == "retries":
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise ValueError("Expected an integer")
+                if not 0 <= value <= MAX_RETRIES:
+                    raise ValueError(f"Expected 0 to {MAX_RETRIES}, got {value}")
+                config["retries"] = value
+            elif key == "labels":
+                if not isinstance(value, dict) or not all(
+                    isinstance(v, str) for v in value.values()
+                ):
+                    raise ValueError("Expected a table of strings")
+                config["labels"] = tuple(value.items())
+            else:
+                raise ValueError("Unknown option")
+        except (ValueError, OSError) as e:
+            raise ValueError(f"{path}: {key}: {e}") from e
+    # Like on the command line, `secrets` take precedence over `env-files`.
+    config["secrets"] = (*env_files, *config.get("secrets", ()))
+    return Config(path=path, **config)
+
+
+def load_config(start: Path | None = None) -> Config:
+    """Load the nearest project config in `start` or its parents, which defaults to the cwd."""
+    found = find_config(start or Path.cwd())
+    return Config() if found is None else parse_config(found[1], found[0])
+
+
+def with_config(config: Config, **options) -> dict:
+    """Merge the command line `options` for `build_job` over the defaults in `config`.
+
+    Options that are None take their default. The defaults' secrets, labels, and `with`
+    packages are extended, with command line secrets and labels overriding those with the
+    same key. Command line volumes override the defaults' volumes with the same destination.
+    """
+    merged = dict(options)
+    for name, value in options.items():
+        if not hasattr(config, name):
+            continue
+        default = getattr(config, name)
+        if name == "volumes":
+            merged[name] = tuple({dest: (src, dest) for src, dest in (*default, *value)}.values())
+        elif isinstance(default, tuple):
+            merged[name] = (*default, *value)
+        elif value is None:
+            merged[name] = default
+    return merged
+
+
 def build_job(
     command: Sequence[str],
     with_: tuple[str, ...] = (),
@@ -332,7 +470,7 @@ def build_job(
         default_name = image_name(image) if image is not None else Path(command[0]).name
     modal_volumes = tuple((src, dest) for src, dest in volumes if not isinstance(src, Path))
     local_dirs = tuple((src, dest) for src, dest in volumes if isinstance(src, Path))
-    modal_secrets = tuple(secret for secret in secrets if isinstance(secret, str))
+    modal_secrets = tuple(dict.fromkeys(secret for secret in secrets if isinstance(secret, str)))
     # Later local secrets override earlier ones with the same key.
     local_secrets = tuple(dict(secret for secret in secrets if not isinstance(secret, str)).items())
     return JobSpec(
@@ -629,7 +767,6 @@ MAX_RETRIES = 10
 retries_option = click.option(
     "--retries",
     type=click.IntRange(0, MAX_RETRIES),
-    default=0,
     metavar="N",
     help=f"Retry the job up to N times if it fails. Defaults to 0, up to a maximum of {MAX_RETRIES}.",
 )
@@ -670,7 +807,28 @@ dry_run_option = click.option(
     is_flag=True,
     help="Print the configuration of the job without running it.",
 )
+no_config_option = click.option(
+    "--no-config",
+    is_flag=True,
+    help=f"Ignore the defaults in `{CONFIG_FILENAME}` or the `[tool.modal-jobs]` table "
+    "of `pyproject.toml`.",
+)
 COMMAND_CONTEXT_SETTINGS = {"ignore_unknown_options": True, "allow_interspersed_args": False}
+
+
+def load_options(no_config: bool, **options) -> tuple[Config, dict]:
+    """Load the project config, unless `no_config`, and merge `options` over it."""
+    try:
+        config = Config() if no_config else load_config()
+    except ValueError as e:
+        raise click.ClickException(f"Invalid config: {e}") from e
+    return config, with_config(config, **options)
+
+
+def print_dry_run(job: JobSpec, config: Config):
+    if config.path is not None:
+        click.echo(f"Defaults: {config.path}")
+    click.echo(format_job(job))
 
 
 def run_and_report(job: JobSpec, name: str):
@@ -716,6 +874,7 @@ def main():
 @name_option
 @label_option
 @dry_run_option
+@no_config_option
 def docker_run(
     image: str,
     command: tuple[str, ...],
@@ -726,41 +885,40 @@ def docker_run(
     cpu: float | None,
     memory: int | None,
     timeout: int | None,
-    retries: int,
+    retries: int | None,
     add_python: str | None,
     detach: bool,
     name: str | None,
     labels: tuple[tuple[str, str], ...],
     dry_run: bool,
+    no_config: bool,
 ):
     """Run COMMAND in the registry image IMAGE on Modal, like `docker run`.
 
     For example, `modal-jobs run --add-python 3.12 docker.io/ubuntu echo hi`.
     """
-    job = build_job(
-        command,
+    config, options = load_options(
+        no_config,
         volumes=volumes,
         secrets=(*env_files, *secrets),
         gpu=gpu,
         cpu=cpu,
         memory=memory,
-        image=image,
         add_python=add_python,
         timeout=timeout,
         retries=retries,
-        detach=detach,
-        name=name,
         labels=labels,
     )
+    job = build_job(command, image=image, detach=detach, name=name, **options)
     if dry_run:
-        click.echo(format_job(job))
+        print_dry_run(job, config)
         return
     import modal.exception
 
     try:
         run_and_report(job, shlex.join(command))
     except modal.exception.ConflictError as e:
-        if add_python is not None or "version of Python" not in str(e):
+        if job.add_python is not None or "version of Python" not in str(e):
             raise
         raise click.ClickException(
             f"Could not find Python in {image}. Add it with `--add-python`, "
@@ -795,6 +953,7 @@ def uv():
 @name_option
 @label_option
 @dry_run_option
+@no_config_option
 def uv_run(
     command: tuple[str, ...],
     with_: tuple[str, ...],
@@ -805,11 +964,12 @@ def uv_run(
     cpu: float | None,
     memory: int | None,
     timeout: int | None,
-    retries: int,
+    retries: int | None,
     detach: bool,
     name: str | None,
     labels: tuple[tuple[str, str], ...],
     dry_run: bool,
+    no_config: bool,
 ):
     """Run COMMAND on Modal with `uv run`.
 
@@ -818,6 +978,18 @@ def uv_run(
     first, or `-` to read it from stdin. Otherwise, COMMAND is run as is, e.g.
     `modal-jobs uv run python -c 'print("hi")'`.
     """
+    config, options = load_options(
+        no_config,
+        with_=with_,
+        volumes=volumes,
+        secrets=(*env_files, *secrets),
+        gpu=gpu,
+        cpu=cpu,
+        memory=memory,
+        timeout=timeout,
+        retries=retries,
+        labels=labels,
+    )
     with tempfile.TemporaryDirectory() as tmp:
         if command[0] == "-":
             script = sys.stdin.read()
@@ -849,24 +1021,11 @@ def uv_run(
         else:
             display_name = shlex.join(command)
         try:
-            job = build_job(
-                command,
-                with_,
-                volumes,
-                (*env_files, *secrets),
-                gpu,
-                cpu=cpu,
-                memory=memory,
-                timeout=timeout,
-                retries=retries,
-                detach=detach,
-                name=name,
-                labels=labels,
-            )
+            job = build_job(command, detach=detach, name=name, **options)
         except (ValueError, tomllib.TOMLDecodeError) as e:
             raise click.ClickException(f"Invalid script metadata in {display_name}: {e}") from e
         if dry_run:
-            click.echo(format_job(job))
+            print_dry_run(job, config)
             return
         run_and_report(job, display_name)
 

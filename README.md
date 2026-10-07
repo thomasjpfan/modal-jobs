@@ -137,6 +137,37 @@ modal-jobs run --gpu H100 nvcr.io/nvidia/pytorch:24.05-py3 python train.py
 modal-jobs uv run -v checkpoints:/ckpt -v ./data:/data -s hf-token -s WANDB_MODE=offline train.py
 ```
 
+### Project defaults
+
+Set default options for a project in the `[tool.modal-jobs]` table of `pyproject.toml`, or
+in a `.modal-jobs.toml` file without the table header. `modal-jobs` uses the nearest one in
+the current directory or its parents:
+
+```toml
+[tool.modal-jobs]
+gpu = "A100"
+timeout = "2h"
+volumes = ["checkpoints:/ckpt", "./data:/data"]
+secrets = ["hf-token"]
+env-files = [".env"]
+labels = { team = "ml" }
+```
+
+The keys are the options above, written like on the command line: `gpu`, `cpu`, `memory`,
+`timeout`, `retries`, `volumes`, `secrets`, `env-files`, `labels`, `with` (for `uv run`), and
+`add-python` (for `run`). Local directories and `.env` files are relative to the config file.
+
+Options on the command line override the defaults. Volumes, secrets, labels, and `with`
+packages are added to the defaults, replacing volumes with the same destination and secrets
+and labels with the same key:
+
+```bash
+# Runs on an H100 with the default volumes and secrets, labeled team=ml and exp=r9.
+modal-jobs uv run --gpu H100 -l exp=r9 train.py
+```
+
+`--dry-run` shows which file the defaults came from, and `--no-config` ignores them.
+
 ## Managing jobs
 
 Job IDs can be shortened to any unique prefix, like `ap-Hc7p`.

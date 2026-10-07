@@ -7,10 +7,13 @@ from click.testing import CliRunner
 
 from modal_jobs import _cli, _format
 from modal_jobs._cli import (
+    Config,
     JobSpec,
     build_job,
+    find_config,
     format_job,
     is_local_path,
+    load_config,
     main,
     parse_duration,
     parse_env_file,
@@ -19,6 +22,7 @@ from modal_jobs._cli import (
     parse_secret,
     parse_volume,
     split_requirements,
+    with_config,
 )
 
 UV_SCRIPT = """\
@@ -1893,3 +1897,260 @@ def test_dashboard_url_without_dashboard(monkeypatch, clear_dashboard_url):
     monkeypatch.setattr(_backend, "dashboard_url", missing_dashboard)
 
     assert _cli.dashboard_url() is None
+
+
+def test_find_config_none(tmp_path):
+    assert find_config(tmp_path) is None
+
+
+def test_find_config_in_parent(tmp_path):
+    (tmp_path / ".modal-jobs.toml").write_text('gpu = "T4"\n')
+    (tmp_path / "sub").mkdir()
+    assert find_config(tmp_path / "sub") == (tmp_path / ".modal-jobs.toml", {"gpu": "T4"})
+
+
+def test_find_config_pyproject(tmp_path):
+    (tmp_path / "pyproject.toml").write_text('[tool.modal-jobs]\ngpu = "T4"\n')
+    assert find_config(tmp_path) == (tmp_path / "pyproject.toml", {"gpu": "T4"})
+
+
+def test_find_config_skips_pyproject_without_table(tmp_path):
+    (tmp_path / ".modal-jobs.toml").write_text('gpu = "T4"\n')
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "pyproject.toml").write_text('[project]\nname = "x"\n')
+    assert find_config(tmp_path / "sub") == (tmp_path / ".modal-jobs.toml", {"gpu": "T4"})
+
+
+def test_find_config_prefers_modal_jobs_toml(tmp_path):
+    (tmp_path / ".modal-jobs.toml").write_text('gpu = "T4"\n')
+    (tmp_path / "pyproject.toml").write_text('[tool.modal-jobs]\ngpu = "A100"\n')
+    assert find_config(tmp_path) == (tmp_path / ".modal-jobs.toml", {"gpu": "T4"})
+
+
+def test_find_config_nearest_wins(tmp_path):
+    (tmp_path / ".modal-jobs.toml").write_text('gpu = "T4"\n')
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "pyproject.toml").write_text('[tool.modal-jobs]\ngpu = "A100"\n')
+    assert find_config(tmp_path / "sub")[1] == {"gpu": "A100"}
+
+
+def test_load_config(tmp_path):
+    (tmp_path / "data").mkdir()
+    (tmp_path / ".env").write_text("TOKEN=abc\nMODE=online\n")
+    (tmp_path / ".modal-jobs.toml").write_text(
+        """\
+gpu = "A100"
+cpu = 4
+memory = "16G"
+timeout = "2h"
+retries = 1
+volumes = ["checkpoints:/ckpt", "./data:/data"]
+secrets = ["hf-token", "MODE=offline"]
+env-files = [".env"]
+labels = { team = "ml" }
+with = ["rich,requests>=2,<3"]
+add-python = "3.12"
+"""
+    )
+    (tmp_path / "sub").mkdir()
+
+    config = load_config(tmp_path / "sub")
+
+    assert config == Config(
+        path=tmp_path / ".modal-jobs.toml",
+        with_=("rich", "requests>=2,<3"),
+        volumes=(("checkpoints", "/ckpt"), (tmp_path / "data", "/data")),
+        secrets=(("TOKEN", "abc"), ("MODE", "online"), "hf-token", ("MODE", "offline")),
+        gpu="A100",
+        cpu=4.0,
+        memory=16384,
+        timeout=7200,
+        retries=1,
+        add_python="3.12",
+        labels=(("team", "ml"),),
+    )
+
+
+def test_load_config_none(tmp_path):
+    assert load_config(tmp_path) == Config()
+
+
+@pytest.mark.parametrize(
+    "content, match",
+    [
+        ('gpus = "T4"', "gpus: Unknown option"),
+        ("gpu = 4", "gpu: Expected a string"),
+        ("cpu = 0", "cpu: Expected a positive number"),
+        ("cpu = true", "cpu: Expected a positive number"),
+        ('memory = "lots"', "memory: Expected a memory size"),
+        ('timeout = "2 hours"', "timeout: Expected a duration"),
+        ("retries = 11", "retries: Expected 0 to 10"),
+        ('volumes = "ckpt:/ckpt"', "volumes: Expected a list of strings"),
+        ('volumes = ["ckpt"]', "volumes: Expected SOURCE:DEST"),
+        ('volumes = ["./missing:/data"]', "volumes: Local directory does not exist"),
+        ('secrets = ["1KEY=x"]', "secrets: Invalid environment variable name"),
+        ('env-files = ["missing.env"]', "env-files: .*No such file"),
+        ("labels = { exp = 8 }", "labels: Expected a table of strings"),
+        ("gpu = ", r"\.modal-jobs\.toml: .*line 1"),
+    ],
+)
+def test_load_config_invalid(tmp_path, content, match):
+    (tmp_path / ".modal-jobs.toml").write_text(content + "\n")
+    with pytest.raises(ValueError, match=match):
+        load_config(tmp_path)
+
+
+def test_with_config():
+    config = Config(
+        with_=("rich",),
+        volumes=(("checkpoints", "/ckpt"), ("data", "/data")),
+        secrets=("hf-token", ("MODE", "online")),
+        gpu="A100",
+        timeout=7200,
+        retries=1,
+        labels=(("team", "ml"), ("exp", "r8")),
+    )
+
+    options = with_config(
+        config,
+        with_=("six",),
+        volumes=(("other-data", "/data"),),
+        secrets=(("MODE", "offline"),),
+        gpu="H100",
+        cpu=None,
+        timeout=None,
+        retries=None,
+        labels=(("exp", "r9"),),
+        detach=True,
+    )
+
+    assert options == {
+        "with_": ("rich", "six"),
+        "volumes": (("checkpoints", "/ckpt"), ("other-data", "/data")),
+        "secrets": ("hf-token", ("MODE", "online"), ("MODE", "offline")),
+        "gpu": "H100",
+        "cpu": None,
+        "timeout": 7200,
+        "retries": 1,
+        "labels": (("team", "ml"), ("exp", "r8"), ("exp", "r9")),
+        "detach": True,
+    }
+    job = build_job(["echo", "hi"], **options)
+    assert job.local_secrets == (("MODE", "offline"),)
+    assert job.labels == (("team", "ml"), ("exp", "r9"))
+
+
+def test_build_job_dedupes_modal_secrets():
+    assert build_job(["echo"], secrets=("a", "b", "a")).secrets == ("a", "b")
+
+
+@pytest.fixture
+def project(tmp_path, monkeypatch):
+    """A project directory with a config, as the cwd."""
+    (tmp_path / ".modal-jobs.toml").write_text(
+        """\
+gpu = "A100"
+timeout = "2h"
+retries = 1
+volumes = ["checkpoints:/ckpt"]
+secrets = ["hf-token"]
+labels = { team = "ml" }
+with = ["rich"]
+add-python = "3.12"
+"""
+    )
+    (tmp_path / "job.py").write_text("print('hi')")
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+def test_run_config(project, monkeypatch):
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(
+        main, ["uv", "run", "--gpu", "H100", "-l", "exp=r9", "-s", "wandb", "job.py"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        build_job(
+            ["job.py"],
+            ("rich",),
+            volumes=(("checkpoints", "/ckpt"),),
+            secrets=("hf-token", "wandb"),
+            gpu="H100",
+            timeout=7200,
+            retries=1,
+            labels=(("team", "ml"), ("exp", "r9")),
+        )
+    ]
+
+
+def test_run_config_retries_override(project, monkeypatch):
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(main, ["uv", "run", "--retries", "0", "job.py"])
+
+    assert result.exit_code == 0, result.output
+    assert calls[0].retries == 0
+
+
+def test_docker_run_config(project, monkeypatch):
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(main, ["run", "docker.io/ubuntu", "echo", "hi"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        build_job(
+            ["echo", "hi"],
+            volumes=(("checkpoints", "/ckpt"),),
+            secrets=("hf-token",),
+            gpu="A100",
+            timeout=7200,
+            retries=1,
+            image="docker.io/ubuntu",
+            add_python="3.12",
+            labels=(("team", "ml"),),
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "args", [["uv", "run", "--no-config", "job.py"], ["run", "--no-config", "img", "ls"]]
+)
+def test_run_no_config(project, monkeypatch, args):
+    calls = []
+    monkeypatch.setattr(_cli, "run_job", calls.append)
+
+    result = CliRunner().invoke(main, args)
+
+    assert result.exit_code == 0, result.output
+    assert calls[0].gpu is None
+    assert calls[0].volumes == ()
+    assert calls[0].labels == ()
+
+
+def test_run_config_dry_run(project):
+    result = CliRunner().invoke(main, ["uv", "run", "--dry-run", "job.py"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith(f"Defaults: {project / '.modal-jobs.toml'}\nName: job.py\n")
+    assert "GPU: A100\n" in result.output
+
+
+@pytest.mark.parametrize("args", [["uv", "run", "job.py"], ["run", "img", "ls"]])
+def test_run_config_invalid(tmp_path, monkeypatch, args):
+    (tmp_path / ".modal-jobs.toml").write_text('gpus = "T4"\n')
+    (tmp_path / "job.py").write_text("print('hi')")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(_cli, "run_job", lambda job: None)
+
+    result = CliRunner().invoke(main, args)
+
+    assert result.exit_code == 1
+    assert "Invalid config:" in result.output
+    assert "gpus: Unknown option" in result.output
