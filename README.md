@@ -150,9 +150,9 @@ ap-Tq4mZ8wK2nR7vXb1  finetune.py         running    21m0s ago  21m0s     A100  t
 ap-Hc7pL2sV9dY4gNe6  finetune.py         succeeded  1h30m ago  59m48s    A100  team=ml,exp=r8
 ap-Ws3bF6jQ1kU8mAa9  preprocess.py       failed     2h30m ago  47s       -     team=data
 ap-Dn9rE5tH3xC2pLo4  eval.py             succeeded  4h0m ago   12m14s    L4    team=ml,exp=r8
-ap-Ka1vM7yB4sJ6qWz3  sweep.py            timed_out  1d1h ago   1h0m      H100       team=ml,sweep=lr
-ap-Pe8gX2cN5rT1hVu7  ubuntu              succeeded  2d0h ago   2s        -          -
-ap-Zm6uR3aW8fK9tDs2  notebook_export.py  stopped    3d0h ago   5m12s     -          -
+ap-Ka1vM7yB4sJ6qWz3  sweep.py            timed_out  1d1h ago   1h0m      H100  team=ml,sweep=lr
+ap-Pe8gX2cN5rT1hVu7  ubuntu              succeeded  2d0h ago   2s        -     -
+ap-Zm6uR3aW8fK9tDs2  notebook_export.py  stopped    3d0h ago   5m12s     -     -
 ```
 
 Filter with `--status`, `--name`, and `--label KEY[=VALUE]` (repeat it to require several
